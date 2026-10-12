@@ -1,3 +1,4 @@
+mod music;
 mod player;
 mod textures;
 mod world;
@@ -457,6 +458,7 @@ struct App {
     player: Player,
     keys: Keys,
     last_frame: Instant,
+    _music: Option<music::Music>,
 }
 
 impl ApplicationHandler for App {
@@ -576,6 +578,7 @@ fn main() {
         player,
         keys: Keys::default(),
         last_frame: Instant::now(),
+        _music: music::Music::start(),
     };
     event_loop.run_app(&mut app).unwrap();
 }
