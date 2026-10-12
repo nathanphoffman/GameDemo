@@ -26,11 +26,12 @@ cargo run --release -- 42
 | Left Shift | Sprint |
 | Left click | Attack a passive animal (deer) if you are close and looking at it |
 | Left click (hold) | Mine the block the crosshair is on |
+| Right click | Place a block against the face the crosshair is on |
 | Esc | Quit |
 
 ## Mining
 
-Hold the left mouse button while the crosshair is on a block. Every two-thirds of a second of holding removes the block under the crosshair (within 5 blocks) and adds to the resource counters in the upper left (see below). Letting go or looking away resets the progress.
+Hold the left mouse button while the crosshair is on a block. Every 0.55 seconds of holding removes the block under the crosshair (within 5 blocks) and adds to the resource counters in the upper left (see below). Letting go or looking away resets the progress.
 
 | Resource | Where it comes from |
 | --- | --- |
@@ -38,6 +39,10 @@ Hold the left mouse button while the crosshair is on a block. Every two-thirds o
 | White | +1 more for a snow block |
 | Green | +1 more for a grass block, +2 for a leaf block |
 | Brown | +1 for a tree trunk block (the rarest) |
+
+## Building
+
+Right click places a block instantly, against the face of the block the crosshair is on (within 5 blocks). It is the same type as that block, and it costs what mining that type gives you: dirt or stone cost 1 grey, grass 1 grey + 1 green, snow 1 grey + 1 white, a trunk 1 brown, a leaf 2 green. Nothing is placed if you can't afford it, if the spot is inside you or a creature, or if you are looking at a creature.
 
 ## Fighting
 

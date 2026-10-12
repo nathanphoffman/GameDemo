@@ -31,7 +31,7 @@ const WALK_SPEED: f32 = 5.0;
 const SPRINT_SPEED: f32 = 8.0;
 const MOUSE_SENSITIVITY: f32 = 0.0022;
 const FOV_Y_DEGREES: f32 = 80.0;
-const MINE_INTERVAL: f32 = 2.0 / 3.0; // seconds of holding to mine one block
+const MINE_INTERVAL: f32 = 0.55; // seconds of holding to mine one block
 const REACH: f32 = 5.0; // blocks
 // Hostile creatures can attack you from this close (horizontally)...
 const MELEE_RANGE: f32 = 2.3;
@@ -597,13 +597,18 @@ struct App {
 }
 
 impl App {
-    /// The block under the crosshair within reach, unless the enemy is what you're looking at.
+    /// The block under the crosshair within reach, unless an enemy is what you're looking at.
     fn block_in_sights(&self) -> Option<(i32, i32, i32)> {
+        self.block_hit_in_sights().map(|hit| hit.block)
+    }
+
+    /// Same, with the empty cell in front of the face that is being looked at.
+    fn block_hit_in_sights(&self) -> Option<world::RayHit> {
         if self.enemy_in_sights().is_some() {
             return None;
         }
         self.world
-            .raycast(self.player.eye(), self.player.forward(), REACH)
+            .raycast_face(self.player.eye(), self.player.forward(), REACH)
     }
 
     /// The closest enemy that is in reach, under the crosshair, and not behind a block.
@@ -721,6 +726,14 @@ impl App {
         }
     }
 
+    /// Sends the world's current blocks to the GPU.
+    fn rebuild_mesh(&mut self) {
+        let (vertices, indices) = self.world.build_mesh();
+        if let Some(gfx) = &mut self.gfx {
+            gfx.update_mesh(&vertices, &indices);
+        }
+    }
+
     fn mine(&mut self) {
         let Some((x, y, z)) =
             self.world
@@ -730,10 +743,54 @@ impl App {
         };
         if let Some(block) = self.world.remove_block(x, y, z) {
             self.resources.gain(block);
-            let (vertices, indices) = self.world.build_mesh();
-            if let Some(gfx) = &mut self.gfx {
-                gfx.update_mesh(&vertices, &indices);
-            }
+            self.rebuild_mesh();
+        }
+    }
+
+    /// Right click: places a block of the same type as the one the crosshair is on, against
+    /// the face it is on, paying what that block would give if mined. It happens instantly.
+    fn place_block(&mut self) {
+        let Some(hit) = self.block_hit_in_sights() else {
+            return;
+        };
+        let Some((x, y, z)) = hit.place else {
+            return;
+        };
+        let (bx, by, bz) = hit.block;
+        let block = self.world.get(bx, by, bz);
+        if !self.resources.can_afford(block) {
+            return;
+        }
+
+        // Don't entomb the player or an enemy.
+        let cell_min = Vec3::new(x as f32, y as f32, z as f32);
+        let cell_max = cell_min + Vec3::ONE;
+        let overlaps = |min: Vec3, max: Vec3| {
+            min.x < cell_max.x
+                && max.x > cell_min.x
+                && min.y < cell_max.y
+                && max.y > cell_min.y
+                && min.z < cell_max.z
+                && max.z > cell_min.z
+        };
+        let half = Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
+        let body = (
+            self.player.pos - half,
+            self.player.pos + half + Vec3::new(0.0, player::HEIGHT, 0.0),
+        );
+        if overlaps(body.0, body.1) {
+            return;
+        }
+        if self.enemies.iter().any(|e| {
+            let (min, max) = e.bounds();
+            overlaps(min, max)
+        }) {
+            return;
+        }
+
+        if self.world.place_block(x, y, z, block) {
+            self.resources.spend(block);
+            self.rebuild_mesh();
         }
     }
 }
@@ -788,6 +845,13 @@ impl ApplicationHandler for App {
                 if state == ElementState::Pressed {
                     self.attack();
                 }
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Right,
+                state: ElementState::Pressed,
+                ..
+            } => {
+                self.place_block();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;

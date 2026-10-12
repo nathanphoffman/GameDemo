@@ -29,6 +29,14 @@ pub struct Vertex {
     pub shade: f32,
 }
 
+/// What a ray found: the block it hit, and the empty cell in front of the face it hit (None
+/// if the ray started inside the block).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RayHit {
+    pub block: (i32, i32, i32),
+    pub place: Option<(i32, i32, i32)>,
+}
+
 pub struct World {
     blocks: Vec<Block>,
     heights: Vec<u8>,
@@ -341,6 +349,12 @@ impl World {
 
     /// Walks a ray through the grid and returns the first solid block within `max_dist`.
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(i32, i32, i32)> {
+        self.raycast_face(origin, dir, max_dist).map(|hit| hit.block)
+    }
+
+    /// Like `raycast`, but also reports the empty cell the ray was in just before it hit,
+    /// which is where a new block would go against the face that was hit.
+    pub fn raycast_face(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
         let dir = dir.normalize_or_zero();
         if dir == Vec3::ZERO {
             return None;
@@ -366,10 +380,15 @@ impl World {
                 t_max[i] = (o[i] - cell[i] as f32) / -d[i];
             }
         }
+        let mut previous: Option<(i32, i32, i32)> = None;
         loop {
             if self.get(cell[0], cell[1], cell[2]) != Block::Air {
-                return Some((cell[0], cell[1], cell[2]));
+                return Some(RayHit {
+                    block: (cell[0], cell[1], cell[2]),
+                    place: previous,
+                });
             }
+            previous = Some((cell[0], cell[1], cell[2]));
             // Step into whichever neighbouring cell the ray reaches first.
             let axis = if t_max[0] < t_max[1] && t_max[0] < t_max[2] {
                 0
@@ -384,6 +403,21 @@ impl World {
             cell[axis] += step[axis];
             t_max[axis] += t_delta[axis];
         }
+    }
+
+    /// Puts a block in an empty cell inside the world. Returns whether it was placed.
+    pub fn place_block(&mut self, x: i32, y: i32, z: i32, block: Block) -> bool {
+        let inside = x >= 0
+            && y >= 0
+            && z >= 0
+            && x < SIZE_X as i32
+            && y < SIZE_Y as i32
+            && z < SIZE_Z as i32;
+        if !inside || block == Block::Air || self.get(x, y, z) != Block::Air {
+            return false;
+        }
+        self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
+        true
     }
 
     /// Removes a block and returns what it was. The bottom layer is kept so there's never a
@@ -698,5 +732,29 @@ mod tests {
                 assert_eq!(w.get(x, y + dy, z), Block::Air);
             }
         }
+    }
+
+    #[test]
+    fn raycast_face_gives_the_cell_in_front_and_blocks_can_be_placed_there() {
+        let mut w = World::generate(5);
+        let s = w.spawn_point();
+        let eye = s + Vec3::new(0.0, 1.62, 0.0);
+        let hit = w.raycast_face(eye, Vec3::NEG_Y, 5.0).expect("ground");
+        let ground = s.y.floor() as i32 - 1;
+        assert_eq!(hit.block.1, ground);
+        let place = hit.place.expect("there is air in front of the top face");
+        assert_eq!(place, (hit.block.0, ground + 1, hit.block.2));
+
+        assert!(w.place_block(place.0, place.1, place.2, Block::Stone));
+        assert_eq!(w.get(place.0, place.1, place.2), Block::Stone);
+        assert!(!w.place_block(place.0, place.1, place.2, Block::Dirt), "occupied");
+        assert!(!w.place_block(-1, 5, 5, Block::Dirt), "outside the world");
+        assert!(!w.place_block(5, SIZE_Y as i32, 5, Block::Dirt), "above the world");
+        assert!(!w.place_block(5, 40, 5, Block::Air), "air is not a block");
+
+        // The new block is what the ray hits now, with its own free cell in front of it.
+        let again = w.raycast_face(eye, Vec3::NEG_Y, 5.0).unwrap();
+        assert_eq!(again.block, place);
+        assert_eq!(again.place, Some((place.0, place.1 + 1, place.2)));
     }
 }
