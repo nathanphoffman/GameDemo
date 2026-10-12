@@ -3,7 +3,7 @@
 use glam::Vec3;
 
 use super::{Vertex, FACES};
-use crate::enemy::{Enemy, Kind};
+use crate::enemy::Kind;
 
 // Texture layers (see textures.rs).
 const BONE: f32 = 13.0;
@@ -23,6 +23,9 @@ const GOLEM: f32 = 52.0;
 const GOLEM_FACE: f32 = 53.0;
 const YETI: f32 = 54.0;
 const YETI_FACE: f32 = 55.0;
+const TUNIC: f32 = 56.0;
+const PLAYER_FACE: f32 = 57.0;
+const TROUSERS: f32 = 58.0;
 const BAR_BACK: f32 = 12.0; // near-black border
 const BAR_LOST: f32 = 16.0; // red
 const BAR_HEALTH: f32 = 17.0; // green
@@ -35,8 +38,9 @@ const BAR_LIFT: f32 = 0.35;
 /// Each bar layer sits this much closer to the viewer so they don't fight in the depth buffer.
 const BAR_LAYER_GAP: f32 = 0.01;
 
-/// How many enemies can be drawn at once, and the most vertices one of them can need.
-pub const MAX_ENEMIES: usize = 8;
+/// How many creatures and other players can be drawn at once, and the most vertices one of
+/// them can need.
+pub const MAX_ENEMIES: usize = 64;
 const MAX_PARTS: usize = 10;
 pub const MAX_VERTICES_PER_ENEMY: usize = MAX_PARTS * 6 * 4 + 3 * 4;
 
@@ -189,16 +193,9 @@ fn parts(kind: Kind) -> Vec<Part> {
     }
 }
 
-/// Body and health bar vertices, with the front (and the bar) turned toward `look_at`.
-pub fn enemy_mesh(e: &Enemy, look_at: Vec3) -> Vec<Vertex> {
-    let pos = e.pos();
-    let front = Vec3::new(look_at.x - pos.x, 0.0, look_at.z - pos.z)
-        .try_normalize()
-        .unwrap_or(Vec3::Z);
-    let right = Vec3::new(front.z, 0.0, -front.x);
-
-    let mut out = Vec::with_capacity(MAX_VERTICES_PER_ENEMY);
-    for part in parts(e.kind) {
+/// Adds the boxes of a body standing at `pos`, whose front is toward `front`.
+fn push_parts(out: &mut Vec<Vertex>, parts: Vec<Part>, pos: Vec3, front: Vec3, right: Vec3) {
+    for part in parts {
         for (f, face) in FACES.iter().enumerate() {
             for i in 0..4 {
                 let c = face.corners[i];
@@ -217,16 +214,52 @@ pub fn enemy_mesh(e: &Enemy, look_at: Vec3) -> Vec<Vertex> {
             }
         }
     }
-    push_health_bar(e, &mut out, pos, front, right);
+}
+
+/// A creature standing at `pos`: its body and health bar, with the front (and the bar) turned
+/// toward `look_at`.
+pub fn creature_mesh(kind: Kind, pos: Vec3, health: i32, look_at: Vec3) -> Vec<Vertex> {
+    let front = Vec3::new(look_at.x - pos.x, 0.0, look_at.z - pos.z)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    let right = Vec3::new(front.z, 0.0, -front.x);
+
+    let mut out = Vec::with_capacity(MAX_VERTICES_PER_ENEMY);
+    push_parts(&mut out, parts(kind), pos, front, right);
+    push_health_bar(kind, health, &mut out, pos, front, right);
+    out
+}
+
+/// The body of a player standing at `pos` and looking along `yaw` (the same angle the camera
+/// uses, so the face is on the side they look toward).
+pub fn player_mesh(pos: Vec3, yaw: f32) -> Vec<Vertex> {
+    let front = Vec3::new(yaw.sin(), 0.0, -yaw.cos());
+    let right = Vec3::new(front.z, 0.0, -front.x);
+    let parts = vec![
+        // Head, with the face on the front.
+        part(
+            [-0.25, 1.35, -0.25],
+            [0.25, 1.85, 0.25],
+            [TROUSERS, TROUSERS, TROUSERS, TROUSERS, PLAYER_FACE, TROUSERS],
+        ),
+        part([-0.3, 0.7, -0.15], [0.3, 1.35, 0.15], [TUNIC; 6]),
+        // Arms and legs.
+        part([0.3, 0.7, -0.12], [0.5, 1.35, 0.12], [TUNIC; 6]),
+        part([-0.5, 0.7, -0.12], [-0.3, 1.35, 0.12], [TUNIC; 6]),
+        part([0.02, 0.0, -0.14], [0.3, 0.7, 0.14], [TROUSERS; 6]),
+        part([-0.3, 0.0, -0.14], [-0.02, 0.7, 0.14], [TROUSERS; 6]),
+    ];
+    let mut out = Vec::with_capacity(parts.len() * 24);
+    push_parts(&mut out, parts, pos, front, right);
     out
 }
 
 /// Three flat quads facing the viewer: border, red (missing health), green (health left).
 /// The green one is anchored to one end so it shrinks as he takes damage.
-fn push_health_bar(e: &Enemy, out: &mut Vec<Vertex>, pos: Vec3, front: Vec3, right: Vec3) {
-    let max = e.kind.max_health() as f32;
-    let fraction = (e.health.max(0) as f32 / max).clamp(0.0, 1.0);
-    let center = pos + Vec3::Y * (e.kind.height() + BAR_LIFT);
+fn push_health_bar(kind: Kind, health: i32, out: &mut Vec<Vertex>, pos: Vec3, front: Vec3, right: Vec3) {
+    let max = kind.max_health() as f32;
+    let fraction = (health.max(0) as f32 / max).clamp(0.0, 1.0);
+    let center = pos + Vec3::Y * (kind.height() + BAR_LIFT);
     let (half_w, half_h) = (BAR_WIDTH / 2.0, BAR_HEIGHT / 2.0);
 
     // (left edge, right edge, half height, layer, how far toward the viewer)
@@ -269,32 +302,47 @@ pub fn indices(vertex_count: usize) -> Vec<u32> {
 mod tests {
     use super::*;
 
-#[test]
-fn every_kind_fits_in_the_buffers() {
-    for kind in Kind::ALL {
-        let e = Enemy::new(1, kind, Vec3::new(10.0, 5.0, 10.0));
-        let v = enemy_mesh(&e, Vec3::ZERO);
-        assert!(v.len() <= MAX_VERTICES_PER_ENEMY, "{kind:?}");
-        assert_eq!(v.len() % 4, 0);
-        assert!(parts(kind).len() <= MAX_PARTS);
-    }
-}
+    const AT: Vec3 = Vec3::new(10.0, 5.0, 10.0);
 
-#[test]
-fn health_bar_shrinks_with_health() {
-    for kind in Kind::ALL {
-        let mut e = Enemy::new(1, kind, Vec3::new(10.0, 5.0, 10.0));
-        let width = |e: &Enemy| {
-            // The green quad is the last four vertices.
-            let v = enemy_mesh(e, Vec3::ZERO);
-            let g = &v[v.len() - 4..];
-            assert_eq!(g[0].layer, BAR_HEALTH);
-            (Vec3::from(g[3].pos) - Vec3::from(g[0].pos)).length()
-        };
-        assert!((width(&e) - BAR_WIDTH).abs() < 1e-4);
-        e.health = kind.max_health() / 2;
-        let fraction = e.health as f32 / kind.max_health() as f32;
-        assert!((width(&e) - BAR_WIDTH * fraction).abs() < 1e-4, "{kind:?}");
+    #[test]
+    fn every_kind_fits_in_the_buffers() {
+        for kind in Kind::ALL {
+            let v = creature_mesh(kind, AT, kind.max_health(), Vec3::ZERO);
+            assert!(v.len() <= MAX_VERTICES_PER_ENEMY, "{kind:?}");
+            assert_eq!(v.len() % 4, 0);
+            assert!(parts(kind).len() <= MAX_PARTS);
+        }
     }
-}
+
+    #[test]
+    fn a_player_is_a_few_boxes_with_their_face_where_they_look() {
+        let v = player_mesh(AT, 0.0);
+        assert!(v.len() <= MAX_VERTICES_PER_ENEMY);
+        assert_eq!(v.len() % 4, 0);
+        // Facing yaw 0 is facing -z: the face quad is the one farthest that way.
+        let face: Vec<&Vertex> = v.iter().filter(|v| v.layer == PLAYER_FACE).collect();
+        assert_eq!(face.len(), 4);
+        assert!(face.iter().all(|v| v.pos[2] < AT.z - 0.2), "{:?}", face[0].pos);
+        // Turned half way round, it is on the +z side.
+        let v = player_mesh(AT, std::f32::consts::PI);
+        let face: Vec<&Vertex> = v.iter().filter(|v| v.layer == PLAYER_FACE).collect();
+        assert!(face.iter().all(|v| v.pos[2] > AT.z + 0.2));
+    }
+
+    #[test]
+    fn health_bar_shrinks_with_health() {
+        for kind in Kind::ALL {
+            let width = |health: i32| {
+                // The green quad is the last four vertices.
+                let v = creature_mesh(kind, AT, health, Vec3::ZERO);
+                let g = &v[v.len() - 4..];
+                assert_eq!(g[0].layer, BAR_HEALTH);
+                (Vec3::from(g[3].pos) - Vec3::from(g[0].pos)).length()
+            };
+            assert!((width(kind.max_health()) - BAR_WIDTH).abs() < 1e-4);
+            let half = kind.max_health() / 2;
+            let fraction = half as f32 / kind.max_health() as f32;
+            assert!((width(half) - BAR_WIDTH * fraction).abs() < 1e-4, "{kind:?}");
+        }
+    }
 }

@@ -8,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 game-core = { path = "game-core" }
+game-net = { path = "game-net" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = "0.29"
 pollster = "1.0.1"

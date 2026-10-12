@@ -8,7 +8,7 @@ impl App {
         if self.ui_open() {
             return;
         }
-        if let Some(target) = self.game.block_in_sights(self.me) {
+        if let Some(target) = self.block_in_sights() {
             self.menu = Some(target);
             self.set_mining(false);
             self.release_cursor();
@@ -42,7 +42,7 @@ impl App {
         let Some(pos) = self.menu else {
             return;
         };
-        if self.game.can_apply(self.me, kind, pos) {
+        if self.can_apply(kind, pos) {
             self.command(Command::ApplyAt { kind, pos });
             self.close_menu();
         }

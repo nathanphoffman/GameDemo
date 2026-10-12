@@ -48,7 +48,7 @@ impl Game {
                 self.world.place_block(x, y + 1, z, Block::Furnace);
             }
             Effect::BuildStairs => {
-                let dir = self.stair_dir(p);
+                let dir = sights::stair_dir(self.players[p].body.yaw);
                 for (sx, sy, sz) in World::stair_cells(x, y, z, dir, STAIR_STEPS) {
                     self.world.place_block(sx, sy, sz, Block::WoodFloor);
                 }
@@ -60,59 +60,21 @@ impl Game {
         true
     }
 
-    /// What applying dense resource `kind` to the block at `pos` would do right now: the
-    /// effect for that type of block, if there is room for it (trees need space).
+    /// What applying dense resource `kind` to the block at `pos` would do right now.
     pub(super) fn effect_at_of(&self, p: usize, kind: usize, pos: (i32, i32, i32)) -> Option<Effect> {
-        let (x, y, z) = pos;
-        let effect = effects::effect_for(kind, self.world.get(x, y, z))?;
-        let fits = match effect {
-            Effect::GrowOak => self.world.tree_fits(x, y, z, false),
-            Effect::GrowPine => self.world.tree_fits(x, y, z, true),
-            e if e.builds_on_top() => {
-                self.world.get(x, y + 1, z) == Block::Air && !self.cell_has_creature(x, y + 1, z)
-            }
-            Effect::BuildStairs => {
-                let dir = self.stair_dir(p);
-                self.world.stairs_fit(x, y, z, dir, STAIR_STEPS)
-                    && !World::stair_cells(x, y, z, dir, STAIR_STEPS)
-                        .any(|(sx, sy, sz)| self.cell_has_creature(sx, sy, sz))
-            }
-            _ => true,
-        };
-        fits.then_some(effect)
+        let yaw = self.players[p].body.yaw;
+        sights::effect_at(&self.world, kind, pos, yaw, &self.occupant_boxes())
     }
 
-    /// The direction the player is mostly facing, as a unit step along x or z.
-    fn stair_dir(&self, p: usize) -> (i32, i32) {
-        let yaw = self.players[p].body.yaw;
-        let (fx, fz) = (yaw.sin(), -yaw.cos());
-        if fx.abs() > fz.abs() {
-            (fx.signum() as i32, 0)
-        } else {
-            (0, fz.signum() as i32)
-        }
+    /// The boxes of every player and creature, which blocks can't be put inside.
+    fn occupant_boxes(&self) -> Vec<(Vec3, Vec3)> {
+        let players = self.players.iter().map(|pl| sights::player_box(pl.body.pos));
+        players.chain(self.enemies.iter().map(|e| e.bounds())).collect()
     }
 
     /// Whether a player or a creature is (partly) inside the cell at (x, y, z).
     fn cell_has_creature(&self, x: i32, y: i32, z: i32) -> bool {
-        let cell_min = Vec3::new(x as f32, y as f32, z as f32);
-        let cell_max = cell_min + Vec3::ONE;
-        let overlaps = |min: Vec3, max: Vec3| {
-            min.x < cell_max.x
-                && max.x > cell_min.x
-                && min.y < cell_max.y
-                && max.y > cell_min.y
-                && min.z < cell_max.z
-                && max.z > cell_min.z
-        };
-        let half = Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
-        self.players.iter().any(|pl| {
-            let pos = pl.body.pos;
-            overlaps(pos - half, pos + half + Vec3::new(0.0, player::HEIGHT, 0.0))
-        }) || self.enemies.iter().any(|e| {
-            let (min, max) = e.bounds();
-            overlaps(min, max)
-        })
+        sights::occupied(&self.occupant_boxes(), x, y, z)
     }
 
     /// Right click: places a block of the same type as the one the crosshair is on, against

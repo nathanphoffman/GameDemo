@@ -1,10 +1,16 @@
-//! The game itself: state, and what happens each frame and on each input.
+//! The game client: the window, the input, and drawing what the host says is going on.
+//!
+//! The game itself (the rules, the creatures, everyone's resources) runs on a host. In single
+//! player that is a host running on its own thread inside this program; in a network game it
+//! is someone else's computer. Either way this program only keeps a copy of what it needs to
+//! draw, and sends what the player does as commands.
 
 mod frame;
 mod input;
 mod menu;
 
-use std::time::Instant;
+use std::net::ToSocketAddrs;
+use std::time::{Duration, Instant};
 
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::CursorGrabMode;
@@ -18,29 +24,64 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 use std::sync::Arc;
 
+use game_net::{Client, Mirror, Server};
+
 use crate::combat::MAX_PLAYER_HP;
 use crate::effects::{self, Effect};
-use crate::game::{Command, Event, Game, PlayerId, PlayerInput, PlayerState, MINE_INTERVAL};
+use crate::enemy::Sight;
+use crate::game::sights::{self, Creature};
+use crate::game::{self, Command, Event, PlayerId, PlayerInput, MINE_INTERVAL};
 use crate::gfx::{Gfx, FOV_Y_DEGREES};
 use crate::hud::{self, HudInfo};
 use crate::mesh::{self, Vertex};
 use crate::music;
-use crate::world;
+use crate::player::Player;
+use crate::weather::Weather;
+use crate::world::{self, World};
 use input::Keys;
 
 const MOUSE_SENSITIVITY: f32 = 0.0022;
 // How fast the health bar's draining chunk catches up, in hp per second.
 const HP_DRAIN_PER_SECOND: f32 = 30.0;
+// Our position is sent to the host at most this often (seconds), unless we do something.
+const POSE_INTERVAL: f32 = 1.0 / 60.0;
+
+/// How to start.
+pub(crate) enum Start {
+    /// Play alone, on a host that runs inside this program.
+    Alone { seed: u32 },
+    /// Join a host at this address.
+    Join { addr: String },
+}
+
+/// Where everyone is right now, smoothed between the host's updates.
+#[derive(Default)]
+pub(crate) struct Scene {
+    pub(crate) players: Vec<game::PlayerView>,
+    pub(crate) enemies: Vec<game::EnemyView>,
+}
 
 pub(crate) struct App {
     gfx: Option<Gfx>,
-    /// The game's state and rules. Everything the player does goes in as a `Command`.
-    game: Game,
-    /// Which of the game's players this window plays.
+    /// The connection to the host.
+    net: Client,
+    /// The host's game as far as we know: the world, and the latest update.
+    mirror: Mirror,
     me: PlayerId,
-    /// What this player is holding down and looking at; sent to the game whenever it changes.
+    /// Our own body. It is walked here, in our copy of the world, so moving feels instant, and
+    /// the host is told where it ended up.
+    body: Player,
+    /// Keys held, and which way we are looking (kept in step with `body`).
     input: PlayerInput,
     keys: Keys,
+    /// What the host was last told about our position, and when.
+    sent_pose: (Vec3, f32, f32),
+    sent_pose_at: Instant,
+    scene: Scene,
+    /// When the latest update from the host arrived, for smoothing movement between them.
+    update_at: Instant,
+    /// Our picture of the weather: the kind comes from the host, how it looks is worked out here.
+    weather: Weather,
     last_frame: Instant,
     /// When the game started, for things that move with time (the clouds).
     started: Instant,
@@ -58,77 +99,205 @@ pub(crate) struct App {
     /// The OS really locked the pointer. If not, it is only confined, and the game keeps
     /// pulling it back to the middle of the window so it can't wander onto another monitor.
     cursor_locked: bool,
+    /// The host went away; the window closes.
+    connection_lost: bool,
     music: Option<music::Music>,
 }
 
 impl App {
-    fn new(seed: u32) -> Self {
-        let mut game = Game::new(seed);
-        let me = game.add_player();
-        App {
+    fn new(net: Client, mirror: Mirror) -> Self {
+        let me = mirror.you;
+        let snapshot = mirror.latest.as_ref().expect("the host has sent an update");
+        let start = snapshot
+            .players
+            .iter()
+            .find(|p| p.id == me)
+            .map_or(Vec3::ZERO, |p| p.pos);
+        let seed = 0x5EA7;
+        let now = Instant::now();
+        let mut app = App {
             gfx: None,
-            game,
+            net,
+            mirror,
             me,
+            body: Player::new(start),
             input: PlayerInput::default(),
             keys: Keys::default(),
-            last_frame: Instant::now(),
-            started: Instant::now(),
+            sent_pose: (start, 0.0, 0.0),
+            sent_pose_at: now,
+            scene: Scene::default(),
+            update_at: now,
+            // The weather never changes by itself here: the host says what it is.
+            weather: Weather::with_settings(seed, f32::MAX, 0.0),
+            last_frame: now,
+            started: now,
             menu: None,
             selected_dense: None,
             cursor_pos: (0.0, 0.0),
             hp_shown: MAX_PLAYER_HP as f32,
             focused: true,
             cursor_locked: false,
+            connection_lost: false,
             music: music::Music::start(),
+        };
+        app.refresh_scene();
+        app
+    }
+
+    /// What the host last told us about our own numbers.
+    fn you(&self) -> &game::YouView {
+        &self.mirror.latest.as_ref().expect("the host has sent an update").you
+    }
+
+    /// Takes in whatever the host has sent: the world changes, the new picture of everyone, and
+    /// what happened (for sounds).
+    fn receive(&mut self) {
+        let ticks = match self.net.poll() {
+            Ok(ticks) => ticks,
+            Err(e) => {
+                eprintln!("lost the connection to the host: {e}");
+                self.connection_lost = true;
+                return;
+            }
+        };
+        if ticks.is_empty() {
+            return;
+        }
+        self.update_at = Instant::now();
+        for tick in &ticks {
+            self.mirror.apply(tick);
+            for event in &tick.events {
+                match *event {
+                    Event::Dug { player, block, ice } if player == self.me => {
+                        if let Some(music) = &self.music {
+                            music.dig(block, ice);
+                        }
+                    }
+                    Event::RoundSkipped { player } if player == self.me => {
+                        // The health bar jumps to its final value instead of draining.
+                        self.hp_shown = tick.snapshot.you.hp as f32;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
-    /// The player this window plays.
-    fn me(&self) -> &PlayerState {
-        self.game.player(self.me).expect("the local player is in the game")
+    /// Works out where everyone is drawn: between the last two updates, so it is smooth.
+    fn refresh_scene(&mut self) {
+        let Some(latest) = &self.mirror.latest else {
+            return;
+        };
+        let t = self.update_at.elapsed().as_secs_f32() / game_net::TICK_SECONDS;
+        let (players, enemies) = latest.blended(self.mirror.previous.as_ref(), t);
+        self.scene = Scene { players, enemies };
     }
 
-    /// Sends the current keys and look direction to the game.
-    fn send_input(&mut self) {
-        self.game.apply(self.me, Command::SetInput(self.input));
+    /// Sends our position and look direction, if they changed (and, unless `now`, not too
+    /// often).
+    fn send_pose(&mut self, now: bool) {
+        let pose = (self.body.pos, self.body.yaw, self.body.pitch);
+        if pose == self.sent_pose {
+            return;
+        }
+        if !now && self.sent_pose_at.elapsed().as_secs_f32() < POSE_INTERVAL {
+            return;
+        }
+        self.send(Command::SetPose { pos: pose.0, yaw: pose.1, pitch: pose.2 });
+        self.sent_pose = pose;
+        self.sent_pose_at = Instant::now();
+    }
+
+    fn send(&mut self, command: Command) {
+        if self.net.send(command).is_err() {
+            self.connection_lost = true;
+        }
+    }
+
+    /// Something the player did that the host decides: first the host is told exactly where
+    /// we are and looking, so it aims the same way we did.
+    fn command(&mut self, command: Command) {
+        self.send_pose(true);
+        self.send(command);
     }
 
     /// Starts or stops mining (the left button held).
     fn set_mining(&mut self, mining: bool) {
         if self.input.mining != mining {
             self.input.mining = mining;
-            self.send_input();
+            self.send_pose(true);
+            // The host doesn't walk us: it is told our position instead.
+            let held = PlayerInput {
+                mining,
+                yaw: self.input.yaw,
+                pitch: self.input.pitch,
+                ..PlayerInput::default()
+            };
+            self.send(Command::SetInput(held));
         }
     }
 
-    /// Does something in the game, then shows what came of it.
-    fn command(&mut self, command: Command) {
-        self.game.apply(self.me, command);
-        self.show_changes();
-    }
-
-    /// Plays the sounds of what happened and sends the changed chunks of the world to the GPU.
-    fn show_changes(&mut self) {
-        for event in self.game.take_events() {
-            match event {
-                Event::Dug { player, block, ice } if player == self.me => {
-                    if let Some(music) = &self.music {
-                        music.dig(block, ice);
-                    }
-                }
-                Event::RoundSkipped { player } if player == self.me => {
-                    // The health bar jumps to its final value instead of draining.
-                    self.hp_shown = self.me().combat.player_hp as f32;
-                }
-                _ => {}
-            }
-        }
-        for (cx, cz) in self.game.world.take_dirty() {
+    /// Sends the chunks of the world that changed to the GPU.
+    fn upload_changed_chunks(&mut self) {
+        for (cx, cz) in self.mirror.world.take_dirty() {
             if let Some(gfx) = &mut self.gfx {
-                let (vertices, indices) = mesh::terrain::build_chunk(&self.game.world, cx, cz);
+                let (vertices, indices) = mesh::terrain::build_chunk(&self.mirror.world, cx, cz);
                 gfx.set_chunk(cx, cz, &vertices, &indices);
             }
         }
+    }
+
+    // ---- what the crosshair is on, worked out from our copy (the host decides for real) ----
+
+    fn creatures(&self) -> Vec<Creature> {
+        self.scene
+            .enemies
+            .iter()
+            .map(|e| Creature::new(e.id, e.kind, e.hostile, e.pos))
+            .collect()
+    }
+
+    pub(crate) fn block_in_sights(&self) -> Option<(i32, i32, i32)> {
+        sights::block_hit_in_sights(
+            &self.mirror.world,
+            self.body.eye(),
+            self.body.forward(),
+            self.body.pos,
+            &self.creatures(),
+        )
+        .map(|hit| hit.block)
+    }
+
+    pub(crate) fn enemy_in_sights(&self) -> Option<Sight> {
+        sights::enemy_in_sights(
+            &self.mirror.world,
+            self.body.eye(),
+            self.body.forward(),
+            self.body.pos,
+            &self.creatures(),
+        )
+    }
+
+    /// What applying dense resource `kind` to the block at `pos` would do right now.
+    pub(crate) fn effect_at(&self, kind: usize, pos: (i32, i32, i32)) -> Option<Effect> {
+        let mut occupants = vec![sights::player_box(self.body.pos)];
+        occupants.extend(
+            self.scene
+                .players
+                .iter()
+                .filter(|p| p.id != self.me)
+                .map(|p| sights::player_box(p.pos)),
+        );
+        occupants.extend(self.creatures().iter().map(|c| (c.min, c.max)));
+        sights::effect_at(&self.mirror.world, kind, pos, self.body.yaw, &occupants)
+    }
+
+    /// Whether applying `kind` there would do anything, and we have enough of it.
+    pub(crate) fn can_apply(&self, kind: usize, pos: (i32, i32, i32)) -> bool {
+        kind < 5
+            && self
+                .effect_at(kind, pos)
+                .is_some_and(|e| self.you().resources.dense[kind] >= e.dense_cost())
     }
 
     /// True while the mouse is pointing at the HUD (Ctrl held, or the apply menu open).
@@ -161,10 +330,64 @@ impl App {
     }
 }
 
+/// Connects to a host (starting one first when playing alone) and waits for the first update.
+fn connect(start: Start) -> Result<(Client, Mirror), String> {
+    let (client, mirror) = match start {
+        Start::Alone { seed } => {
+            let server = Server::bind("127.0.0.1:0", seed)
+                .map_err(|e| format!("can't start the game: {e}"))?
+                .quiet();
+            let addr = server.local_addr().map_err(|e| e.to_string())?;
+            std::thread::spawn(move || {
+                if let Err(e) = server.run() {
+                    eprintln!("the game stopped: {e}");
+                }
+            });
+            // The host is making its world; make ours at the same time.
+            let world = World::generate(seed);
+            let (client, welcome) =
+                Client::connect(addr).map_err(|e| format!("can't start the game: {e}"))?;
+            (client, Mirror::with_world(&welcome, world))
+        }
+        Start::Join { addr } => {
+            let target = addr
+                .to_socket_addrs()
+                .map_err(|e| format!("bad address {addr}: {e}"))?
+                .next()
+                .ok_or_else(|| format!("no such address: {addr}"))?;
+            println!("joining {target} ...");
+            let (client, welcome) =
+                Client::connect(target).map_err(|e| format!("can't join {addr}: {e}"))?;
+            println!("joined, building the world (seed {}) ...", welcome.seed);
+            (client, Mirror::new(&welcome))
+        }
+    };
+    let (mut client, mut mirror) = (client, mirror);
+    let start = Instant::now();
+    while mirror.latest.is_none() {
+        if start.elapsed() > Duration::from_secs(15) {
+            return Err("the host didn't send anything".into());
+        }
+        match client.wait_tick(Duration::from_millis(200)) {
+            Ok(Some(tick)) => mirror.apply(&tick),
+            Ok(None) => {}
+            Err(e) => return Err(format!("lost the host: {e}")),
+        }
+    }
+    Ok((client, mirror))
+}
+
 /// Opens the window and runs the game until it is closed.
-pub(crate) fn run(seed: u32) {
+pub(crate) fn run(start: Start) {
+    let (net, mirror) = match connect(start) {
+        Ok(connection) => connection,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(seed);
+    let mut app = App::new(net, mirror);
     event_loop.run_app(&mut app).unwrap();
 }

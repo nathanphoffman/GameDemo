@@ -1,7 +1,7 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 56; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 59; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
@@ -12,7 +12,8 @@ pub const LAYERS: u32 = 56; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 
                             // 31 plant leaves, 32 rain, 33 wind, 34 ice, 35 sand, 36 red rock, 37 clay, 38 basalt,
                             // 39 magma, 40 cactus, 41 meadow grass top, 42 swamp grass top, 43 mud,
                             // 44-55 creatures: wolf, wolf face, boar, boar face, zombie, zombie face,
-                            // scorpion, scorpion face, golem, golem face, yeti, yeti face
+                            // scorpion, scorpion face, golem, golem face, yeti, yeti face,
+                            // 56-58 other players: tunic, face, trousers and hair
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -288,6 +289,9 @@ fn tile(layer: u32) -> Vec<u8> {
                 54 => shaded([232.0, 238.0, 246.0], x, y, 121),
                 55 => face_tile(x, y, [232.0, 238.0, 246.0], [20, 24, 40, 255], [90, 110, 150, 255], 122),
                 // Wooden floor: horizontal planks with dark seams.
+                56 => shaded([52.0, 96.0, 190.0], x, y, 130),
+                57 => face_tile(x, y, [226.0, 180.0, 148.0], [24, 28, 40, 255], [160, 84, 76, 255], 131),
+                58 => shaded([70.0, 52.0, 40.0], x, y, 132),
                 25 => {
                     let plank = y / 4;
                     let seam = y % 4 == 0 || (x + plank * 5) % 16 == 0;

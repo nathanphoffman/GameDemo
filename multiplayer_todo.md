@@ -18,20 +18,27 @@
       resources, health and dice. `Mirror` in `game-net` rebuilds this on the player's side.
 - [x] Bare-bones test client: `cargo run -p gamedemo-host --bin walker -- [address] [seconds]`.
 
-## Next
-4. **Game client changes**: the client no longer owns the `Game`. It keeps a `Mirror` of what
-   the host sends, and sends commands over the connection instead of calling `apply` directly.
-   (Drawing, crosshair targeting and the apply menu need the mirror's world and snapshot, and
-   `Game`'s sight/effect questions need a version that works from the mirror.)
-5. **Draw other players**: there is no player model or mesh yet.
-6. **Single player**: run the host inside the game in a background thread and connect to it, so
-   single player and multiplayer use the same path.
-7. **Cleanup**:
-   - Weather is currently based on the first player only (biome, snow, underwater).
-   - Movement will feel laggy over a network without some prediction.
-   - Players can't be told apart by name; no chat.
-   - Per-player spawn limits for creatures are untested with real second players.
-   - The host trusts commands for reach: a modified client could apply resources to far away
-     blocks (bad numbers and out of range positions are already refused).
-   - A player who is too slow to keep up is dropped, and there is no way to rejoin the same
-     character (a rejoin is a new player).
+- [x] Game client talks to a host: it keeps a `Mirror` of the world and the latest update, and
+      sends commands. Crosshair targeting and the apply menu work from the client's copy
+      (`game_core::game::sights`, shared with the host's `Game`).
+- [x] Other players are drawn (`mesh::creature::player_mesh`).
+- [x] Single player runs a host on a background thread inside the game and connects to it, so it
+      uses the same path as a network game. Join one with `gamedemo join <address:port>`.
+- [x] Movement: each player walks on their own copy of the world and tells the host where they
+      are (`Command::SetPose`), so it feels instant. The host refuses impossible jumps.
+- [x] Creatures and other players are drawn blended between the host's updates, so they move
+      smoothly.
+
+## Left
+- **Weather**: the host rolls the weather for everyone (the biome bend and snow are worked out
+  per player on the client now), but the host's own copy still uses the first player's biome.
+- **Cheating**: a modified client could report any position (up to the speed limit) and apply
+  resources to far-away blocks. Fine for friends, not for strangers.
+- **Rejoining**: a dropped player comes back as a new player with new resources.
+- **Names, chat, a player list**: none.
+- **Creature spawning** with several real players spread out is untested.
+- **Memory and start-up in single player**: the host and the game each build their own copy of
+  the world (about twice the memory, built at the same time).
+- **Other players' actions**: their digging and fighting make no sound or effect on your screen
+  yet (only your own).
+- **Play-testing**: the window code was run and checked by screenshot, but not played for long.

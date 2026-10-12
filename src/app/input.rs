@@ -73,7 +73,6 @@ impl App {
             }
             _ => {}
         }
-        self.send_input();
     }
 }
 
@@ -94,11 +93,11 @@ impl ApplicationHandler for App {
         let mut gfx = Gfx::new(window);
         for cz in 0..world::CHUNKS_Z {
             for cx in 0..world::CHUNKS_X {
-                let (vertices, indices) = mesh::terrain::build_chunk(&self.game.world, cx, cz);
+                let (vertices, indices) = mesh::terrain::build_chunk(&self.mirror.world, cx, cz);
                 gfx.set_chunk(cx, cz, &vertices, &indices);
             }
         }
-        self.game.world.take_dirty();
+        self.mirror.world.take_dirty();
         self.gfx = Some(gfx);
         self.grab_cursor();
         self.last_frame = Instant::now();
@@ -113,7 +112,6 @@ impl ApplicationHandler for App {
             self.input.pitch -= dy as f32 * MOUSE_SENSITIVITY;
             let limit = 89.0_f32.to_radians();
             self.input.pitch = self.input.pitch.clamp(-limit, limit);
-            self.send_input();
         }
     }
 
@@ -134,12 +132,12 @@ impl ApplicationHandler for App {
                 } else {
                     // Let go of everything so nothing stays "held" while we're away.
                     self.keys = Keys::default();
+                    self.set_mining(false);
                     self.input = PlayerInput {
                         yaw: self.input.yaw,
                         pitch: self.input.pitch,
                         ..PlayerInput::default()
                     };
-                    self.send_input();
                     self.release_cursor();
                 }
             }
@@ -191,7 +189,11 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.connection_lost {
+            event_loop.exit();
+            return;
+        }
         if let Some(gfx) = &self.gfx {
             gfx.window.request_redraw();
         }

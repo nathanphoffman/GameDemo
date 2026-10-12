@@ -601,6 +601,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "game-core",
+ "game-net",
  "glam",
  "pollster",
  "rodio",

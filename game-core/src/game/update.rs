@@ -38,27 +38,14 @@ impl Game {
         self.update_background(dt);
     }
 
-    /// Walks the player along the keys held.
+    /// Walks the player along the keys held (unless they walk on their own computer).
     fn move_player(&mut self, p: usize, dt: f32) {
         let player = &mut self.players[p];
-        let input = player.input;
-        let (forward, right) = player.body.flat_axes();
-        let mut dir = Vec3::ZERO;
-        if input.forward {
-            dir += forward;
+        player.since_pose += dt;
+        if player.pose_from_client {
+            return;
         }
-        if input.back {
-            dir -= forward;
-        }
-        if input.right {
-            dir += right;
-        }
-        if input.left {
-            dir -= right;
-        }
-        let speed = if input.sprint { SPRINT_SPEED } else { WALK_SPEED };
-        let velocity = dir.normalize_or_zero() * speed;
-        player.body.update(dt, velocity, input.jump, &self.world);
+        walk(&mut player.body, &player.input, dt, &self.world);
     }
 
     /// Mining progress builds while the button is held on a block. Looking at an enemy or away

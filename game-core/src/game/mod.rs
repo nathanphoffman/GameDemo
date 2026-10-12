@@ -5,6 +5,7 @@
 
 mod blocks;
 mod fight;
+pub mod sights;
 mod snapshot;
 mod update;
 
@@ -15,9 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::biome::Biome;
 use crate::combat::{Candidate, Combat, Side};
-use crate::effects::{self, Effect, Fires, STAIR_STEPS};
-use crate::enemy::{self, Dice, Enemy, Kind, Sight};
-use crate::player::{self, Player};
+use crate::effects::{Effect, Fires, STAIR_STEPS};
+use crate::enemy::{Dice, Enemy, Kind, Sight};
+use crate::player::Player;
 use crate::resources::{Converter, Resources};
 use crate::weather::Weather;
 use crate::world::{self, Block, World};
@@ -38,11 +39,34 @@ pub const FORGE_RANGE: f32 = 6.0;
 pub const FURNACE_RANGE: f32 = 10.0;
 /// After a round ends, the next one can't start for this long.
 pub const ROUND_PAUSE: f32 = 2.0;
+/// Fastest a player can really move, in blocks per second (falling is the fastest).
+const MAX_POSE_SPEED: f32 = 80.0;
 /// How many kinds of dense resource there are.
 const DENSE_KINDS: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct PlayerId(pub u32);
+
+/// Moves `body` for `dt` seconds along the keys in `input` (and jumps), in `world`.
+pub fn walk(body: &mut Player, input: &PlayerInput, dt: f32, world: &World) {
+    let (forward, right) = body.flat_axes();
+    let mut dir = Vec3::ZERO;
+    if input.forward {
+        dir += forward;
+    }
+    if input.back {
+        dir -= forward;
+    }
+    if input.right {
+        dir += right;
+    }
+    if input.left {
+        dir -= right;
+    }
+    let speed = if input.sprint { SPRINT_SPEED } else { WALK_SPEED };
+    let velocity = dir.normalize_or_zero() * speed;
+    body.update(dt, velocity, input.jump, world);
+}
 
 /// What a player is holding down and where they are looking. Sent whole whenever it changes.
 #[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
@@ -71,6 +95,11 @@ pub struct PlayerState {
     pub mine_timer: f32,
     /// Seconds until the next round of a fight may start.
     pub round_pause: f32,
+    /// The player's own computer works out where they walk (see `Command::SetPose`), so the
+    /// host stops moving them.
+    pose_from_client: bool,
+    /// Seconds since a pose was last accepted.
+    since_pose: f32,
     /// How much faster conversion is right now (a forge or furnace is close).
     pub conversion_boost: u32,
     was_busy: bool,
@@ -89,6 +118,8 @@ impl PlayerState {
             combat: Combat::new(),
             mine_timer: 0.0,
             round_pause: 0.0,
+            pose_from_client: false,
+            since_pose: 0.0,
             conversion_boost: 1,
             was_busy: false,
         }
@@ -100,6 +131,10 @@ impl PlayerState {
 pub enum Command {
     /// Keys held and look direction.
     SetInput(PlayerInput),
+    /// Where the player's own computer says they are, and where they look. This is how a
+    /// player moves in a network game: they walk on their own copy of the world, so it feels
+    /// instant, and the host takes their word for it, as long as it is not an impossible jump.
+    SetPose { pos: Vec3, yaw: f32, pitch: f32 },
     /// A click: starts a fight with the passive creature under the crosshair, or skips ahead
     /// in the current round.
     Attack,
@@ -211,6 +246,32 @@ impl Game {
                 player.input = input;
                 player.body.yaw = input.yaw;
                 player.body.pitch = input.pitch;
+            }
+            Command::SetPose { pos, yaw, pitch } => {
+                let in_world = pos.x >= 0.0
+                    && pos.z >= 0.0
+                    && pos.x < world::SIZE_X as f32
+                    && pos.z < world::SIZE_Z as f32
+                    && pos.y > -1.0
+                    && pos.y < world::SIZE_Y as f32 * 2.0;
+                if !(pos.is_finite() && yaw.is_finite() && pitch.is_finite() && in_world) {
+                    return;
+                }
+                let player = &mut self.players[p];
+                // Faster than anyone can fall or run is not walking.
+                let allowed = MAX_POSE_SPEED * (player.since_pose + 0.1) + 1.0;
+                if (pos - player.body.pos).length() > allowed {
+                    return;
+                }
+                let limit = 89.0_f32.to_radians();
+                let pitch = pitch.clamp(-limit, limit);
+                player.body.pos = pos;
+                player.body.yaw = yaw;
+                player.body.pitch = pitch;
+                player.input.yaw = yaw;
+                player.input.pitch = pitch;
+                player.pose_from_client = true;
+                player.since_pose = 0.0;
             }
             Command::Attack => self.attack(p),
             Command::PlaceBlock => self.place_block(p),
@@ -337,5 +398,46 @@ mod tests {
         game.update(1.0 / 60.0);
         assert!(game.player(me).is_none());
         assert!(game.block_in_sights(me).is_none());
+    }
+
+    #[test]
+    fn a_player_who_reports_their_own_position_is_not_moved_by_the_host() {
+        let mut game = Game::new(3);
+        let me = game.add_player();
+        run(&mut game, 1.0);
+        let start = game.player(me).unwrap().body.pos;
+        let target = start + Vec3::new(3.0, 0.0, 0.0);
+        game.apply(me, Command::SetPose { pos: target, yaw: 0.5, pitch: 0.2 });
+        // The keys say forward, but the player's own computer is in charge.
+        let input = PlayerInput { forward: true, yaw: 0.5, ..PlayerInput::default() };
+        game.apply(me, Command::SetInput(input));
+        run(&mut game, 0.5);
+        let body = &game.player(me).unwrap().body;
+        assert!((body.pos - target).length() < 1e-4, "{:?} vs {target:?}", body.pos);
+        assert_eq!(body.yaw, 0.5);
+    }
+
+    #[test]
+    fn impossible_positions_are_refused() {
+        let mut game = Game::new(3);
+        let me = game.add_player();
+        run(&mut game, 1.0);
+        let start = game.player(me).unwrap().body.pos;
+        for pos in [
+            start + Vec3::new(500.0, 0.0, 0.0),
+            Vec3::new(f32::NAN, 5.0, 5.0),
+            Vec3::new(-10.0, 5.0, 5.0),
+            Vec3::new(5.0, 5000.0, 5.0),
+        ] {
+            game.apply(me, Command::SetPose { pos, yaw: 0.0, pitch: 0.0 });
+            assert_eq!(game.player(me).unwrap().body.pos, start, "{pos:?}");
+        }
+        game.apply(me, Command::SetPose { pos: start, yaw: f32::NAN, pitch: 0.0 });
+        assert_eq!(game.player(me).unwrap().body.yaw, 0.0);
+        // A wild kind of resource doesn't crash anything.
+        game.apply(me, Command::ApplyToTarget { kind: 99 });
+        game.apply(me, Command::ApplyAt { kind: 99, pos: (1, 1, 1) });
+        game.apply(me, Command::ApplyAt { kind: 0, pos: (i32::MAX, 0, i32::MIN) });
+        assert!(!game.can_apply(me, 99, (1, 1, 1)));
     }
 }

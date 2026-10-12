@@ -9,44 +9,21 @@ impl Game {
 
     /// Same, with the empty cell in front of the face that is being looked at.
     pub(super) fn block_hit_in_sights_of(&self, p: usize) -> Option<world::RayHit> {
-        if self.enemy_in_sights_of(p).is_some() {
-            return None;
-        }
         let body = &self.players[p].body;
-        self.world.raycast_face(body.eye(), body.forward(), REACH)
+        sights::block_hit_in_sights(&self.world, body.eye(), body.forward(), body.pos, &self.creatures())
     }
 
     /// The closest enemy that is in reach, under the crosshair, and not behind a block.
     pub(super) fn enemy_in_sights_of(&self, p: usize) -> Option<Sight> {
         let body = &self.players[p].body;
-        let (eye, dir) = (body.eye(), body.forward());
-        let (mut best, mut best_dist) = (None, f32::INFINITY);
-        for enemy in &self.enemies {
-            let (min, max) = enemy.bounds();
-            let Some(dist) = enemy::ray_box(eye, dir, min, max).filter(|d| *d <= REACH) else {
-                continue;
-            };
-            if dist < best_dist {
-                let offset = enemy.pos() - body.pos;
-                best_dist = dist;
-                best = Some(Sight {
-                    id: enemy.id,
-                    hostile: enemy.hostile,
-                    min,
-                    max,
-                    distance: Vec3::new(offset.x, 0.0, offset.z).length(),
-                });
-            }
-        }
-        let sight = best?;
-        if let Some((x, y, z)) = self.world.raycast(eye, dir, REACH) {
-            let block_min = Vec3::new(x as f32, y as f32, z as f32);
-            let block_dist = enemy::ray_box(eye, dir, block_min, block_min + Vec3::ONE);
-            if block_dist.is_some_and(|d| d < best_dist) {
-                return None;
-            }
-        }
-        Some(sight)
+        sights::enemy_in_sights(&self.world, body.eye(), body.forward(), body.pos, &self.creatures())
+    }
+
+    fn creatures(&self) -> Vec<sights::Creature> {
+        self.enemies
+            .iter()
+            .map(|e| sights::Creature::new(e.id, e.kind, e.hostile, e.pos()))
+            .collect()
     }
 
     /// Hostile creatures within `range` of the player (horizontally, and not on another

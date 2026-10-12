@@ -101,6 +101,15 @@ impl Kind {
         }
     }
 
+    /// The aiming box of one of these standing with its feet at `pos`.
+    pub fn bounds_at(self, pos: Vec3) -> (Vec3, Vec3) {
+        let half = self.half_width();
+        (
+            pos - Vec3::new(half, 0.0, half),
+            pos + Vec3::new(half, self.height(), half),
+        )
+    }
+
     pub fn height(self) -> f32 {
         match self {
             Kind::Skeleton | Kind::BogZombie | Kind::Deer => 2.0,
@@ -260,12 +269,7 @@ impl Enemy {
 
     /// Box used for aiming, the wireframe highlight, and hit tests.
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        let pos = self.body.pos;
-        let half = self.kind.half_width();
-        (
-            pos - Vec3::new(half, 0.0, half),
-            pos + Vec3::new(half, self.kind.height(), half),
-        )
+        self.kind.bounds_at(self.body.pos)
     }
 
 }

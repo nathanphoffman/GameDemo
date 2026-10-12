@@ -4,33 +4,49 @@ use super::*;
 use crate::biome::Biome;
 
 impl App {
-    /// Runs one frame: moves the player, mining, the fight, weather and background
-    /// conversion, then draws everything.
+    /// Runs one frame: takes in what the host sent, walks, then draws everything.
     pub(crate) fn redraw(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
-        self.game.update(dt);
-        self.show_changes();
-        let hp = self.me().combat.player_hp as f32;
-        self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(hp);
+        self.receive();
+        self.upload_changed_chunks();
+        self.refresh_scene();
 
-        // One crack stage, halfway through the mining time.
-        let stage = if self.me().mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
-        let weather = &self.game.weather;
+        // Walk here and now, on our copy of the world, and tell the host where we are.
+        self.body.yaw = self.input.yaw;
+        self.body.pitch = self.input.pitch;
+        game::walk(&mut self.body, &self.input, dt, &self.mirror.world);
+        self.send_pose(false);
+
+        let you = self.you().clone();
+        self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(you.hp as f32);
+
+        // The host says what the weather is; how it looks (fading, clouds) is worked out here.
+        if let Some(latest) = &self.mirror.latest {
+            self.weather.kind = latest.weather;
+        }
+        let (px, pz) = (self.body.pos.x.floor() as i32, self.body.pos.z.floor() as i32);
+        self.weather.biome = self.mirror.world.biome(px, pz);
+        self.weather.snowing = self.weather.biome == Biome::Snow;
+        self.weather.underwater = self.mirror.world.in_water(self.body.eye());
+        self.weather.update(dt);
         if let Some(music) = &mut self.music {
             // Rain you hear is snow in the cold; either way it is as loud as the rain is.
-            let amount = weather.params.rain;
-            let snowing = weather.snowing;
-            let creepy = matches!(weather.biome, Biome::Volcanic | Biome::Swamp);
+            let amount = self.weather.params.rain;
+            let snowing = self.weather.snowing;
+            let creepy = matches!(self.weather.biome, Biome::Volcanic | Biome::Swamp);
             let (rain, snow) = if snowing { (0.0, amount) } else { (amount, 0.0) };
             music.update(rain, snow, if creepy { 1.0 } else { 0.0 }, dt);
         }
 
+        // One crack stage, halfway through the mining time.
+        let stage = if you.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+
         // Whatever the crosshair is on: an enemy, or else a block.
-        let enemy_target = self.game.enemy_in_sights(self.me).map(|s| (s.min, s.max));
-        let target = self.game.block_in_sights(self.me);
+        let enemy_target = self.enemy_in_sights().map(|s| (s.min, s.max));
+        let target = self.block_in_sights();
         let crack = target
             .filter(|_| stage >= 1)
             .map(|block| (block, stage));
@@ -43,20 +59,16 @@ impl App {
             })
         });
 
-        let player = self.game.player(self.me).expect("the local player is in the game");
-        let look_at = player.body.pos;
-        let enemy_rolls: Vec<(u32, u32, f32)> = player
-            .combat
-            .enemy_rolls
-            .iter()
-            .map(|r| r.view())
-            .collect();
-        let enemy_mesh: Vec<Vertex> = self
-            .game
-            .enemies
-            .iter()
-            .flat_map(|e| mesh::creature::enemy_mesh(e, e.facing(look_at)))
-            .collect();
+        // Creatures face us (unless they are walking home), and other players are drawn too.
+        let look_at = self.body.pos;
+        let mut enemy_mesh: Vec<Vertex> = Vec::new();
+        for e in &self.scene.enemies {
+            let facing = e.returning_home.unwrap_or(look_at);
+            enemy_mesh.extend(mesh::creature::creature_mesh(e.kind, e.pos, e.health, facing));
+        }
+        for p in self.scene.players.iter().filter(|p| p.id != self.me) {
+            enemy_mesh.extend(mesh::creature::player_mesh(p.pos, p.yaw));
+        }
 
         self.recenter_cursor();
 
@@ -72,27 +84,24 @@ impl App {
                 gfx.config.width,
                 gfx.config.height,
                 &HudInfo {
-                    resources: player.resources.as_array(),
-                    dense: player.resources.dense,
+                    resources: you.resources.as_array(),
+                    dense: you.resources.dense,
                     menu: menu_labels,
-                    converting: player
-                        .converter
-                        .selected()
-                        .map(|kind| (kind, player.converter.fraction())),
+                    converting: you.converting,
                     ctrl_held: self.keys.ctrl,
-                    weather_label: self.game.weather.label(),
+                    weather_label: self.weather.label(),
                     selection: self
                         .selected_dense
-                        .map(|kind| (kind, player.resources.dense[kind])),
+                        .map(|kind| (kind, you.resources.dense[kind])),
                     target_label,
-                    conversion_boost: player.conversion_boost,
-                    player_roll: player.combat.player_roll.map(|r| r.view()),
-                    enemy_rolls: &enemy_rolls,
-                    hp: (self.hp_shown, player.combat.player_hp, MAX_PLAYER_HP),
+                    conversion_boost: you.conversion_boost,
+                    player_roll: you.player_roll,
+                    enemy_rolls: &you.enemy_rolls,
+                    hp: (self.hp_shown, you.hp, MAX_PLAYER_HP),
                 },
             );
             let time = self.started.elapsed().as_secs_f32();
-            gfx.render(player.body.eye(), player.body.forward(), time, &self.game.weather, &hud);
+            gfx.render(self.body.eye(), self.body.forward(), time, &self.weather, &hud);
         }
     }
 
@@ -116,21 +125,20 @@ impl App {
     fn target_label(&self) -> Option<(&'static str, f32, f32)> {
         // With a dense resource selected: what right click would build on the block
         // the crosshair is on, written over that block.
-        let player = self.me();
-        match (self.selected_dense, self.game.block_in_sights(self.me)) {
+        match (self.selected_dense, self.block_in_sights()) {
             (Some(kind), Some(pos)) if !self.ui_open() => {
                 // Only if there is enough of it (a staircase needs one per step).
                 let enough = |effect: &Effect| {
-                    player.resources.dense[kind] >= effect.dense_cost()
+                    self.you().resources.dense[kind] >= effect.dense_cost()
                 };
-                self.game.effect_at(self.me, kind, pos).filter(enough).and_then(|effect| {
+                self.effect_at(kind, pos).filter(enough).and_then(|effect| {
                     let (width, height) = self
                         .gfx
                         .as_ref()
                         .map_or((1.0, 1.0), |g| (g.config.width as f32, g.config.height as f32));
                     let view = Mat4::look_to_rh(
-                        player.body.eye(),
-                        player.body.forward(),
+                        self.body.eye(),
+                        self.body.forward(),
                         Vec3::Y,
                     );
                     let proj = Mat4::perspective_rh(
@@ -156,8 +164,7 @@ impl App {
             let mut labels = [None; 5];
             for (kind, label) in labels.iter_mut().enumerate() {
                 *label = self
-                    .game
-                    .effect_at(self.me, kind, pos)
+                    .effect_at(kind, pos)
                     .map(|e| (e.label(), e.dense_cost()));
             }
             labels

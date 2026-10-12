@@ -37,6 +37,7 @@ pub struct Server {
     listener: TcpListener,
     seed: u32,
     stop: Arc<AtomicBool>,
+    quiet: bool,
 }
 
 impl Server {
@@ -46,7 +47,14 @@ impl Server {
             listener: TcpListener::bind(addr)?,
             seed,
             stop: Arc::new(AtomicBool::new(false)),
+            quiet: false,
         })
+    }
+
+    /// Don't print who joins and leaves.
+    pub fn quiet(mut self) -> Server {
+        self.quiet = true;
+        self
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -65,6 +73,7 @@ impl Server {
         let stop = self.stop.clone();
         thread::spawn(move || accept_loop(listener, to_loop, stop));
 
+        let quiet = self.quiet;
         let mut game = Game::new(self.seed);
         let mut clients: HashMap<u64, Connected> = HashMap::new();
         let mut tick_number: u64 = 0;
@@ -92,7 +101,9 @@ impl Server {
                         let sent = wire::encode(&welcome)
                             .is_ok_and(|bytes| outbox.try_send(bytes).is_ok());
                         if sent {
-                            println!("player {} joined ({} here)", player.0, clients.len() + 1);
+                            if !quiet {
+                                println!("player {} joined ({} here)", player.0, clients.len() + 1);
+                            }
                             clients.insert(conn, Connected { player, outbox });
                         } else {
                             game.remove_player(player);
@@ -106,7 +117,9 @@ impl Server {
                     Incoming::Left { conn } => {
                         if let Some(client) = clients.remove(&conn) {
                             game.remove_player(client.player);
-                            println!("player {} left ({} here)", client.player.0, clients.len());
+                            if !quiet {
+                                println!("player {} left ({} here)", client.player.0, clients.len());
+                            }
                         }
                     }
                 }
@@ -138,7 +151,9 @@ impl Server {
             for conn in too_slow {
                 if let Some(client) = clients.remove(&conn) {
                     game.remove_player(client.player);
-                    println!("player {} dropped (not keeping up)", client.player.0);
+                    if !quiet {
+                        println!("player {} dropped (not keeping up)", client.player.0);
+                    }
                 }
             }
 

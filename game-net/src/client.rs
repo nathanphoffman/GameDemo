@@ -90,17 +90,24 @@ pub struct Mirror {
     pub you: PlayerId,
     pub world: World,
     pub latest: Option<Snapshot>,
+    /// The update before `latest`, for smoothing movement between updates.
+    pub previous: Option<Snapshot>,
     pub last_tick: u64,
 }
 
 impl Mirror {
     /// Builds the world the host described.
     pub fn new(welcome: &Welcome) -> Mirror {
-        let mut world = World::generate(welcome.seed);
+        Mirror::with_world(welcome, World::generate(welcome.seed))
+    }
+
+    /// Same, for a world already generated from the host's seed (generating takes a while, so
+    /// it can be done ahead of time).
+    pub fn with_world(welcome: &Welcome, mut world: World) -> Mirror {
         for change in &welcome.blocks {
             world.apply_change(*change);
         }
-        Mirror { you: welcome.you, world, latest: None, last_tick: 0 }
+        Mirror { you: welcome.you, world, latest: None, previous: None, last_tick: 0 }
     }
 
     /// Takes in one update from the host.
@@ -108,6 +115,7 @@ impl Mirror {
         for change in &tick.blocks {
             self.world.apply_change(*change);
         }
+        self.previous = self.latest.take();
         self.latest = Some(tick.snapshot.clone());
         self.last_tick = tick.number;
     }
