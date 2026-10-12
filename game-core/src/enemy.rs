@@ -63,16 +63,20 @@ impl Kind {
         }
     }
 
+    /// How much it takes to bring one down. This is the difficulty of its zone: the safe
+    /// meadows and plains have the weakest creatures, the scary biomes the toughest. (How many
+    /// there are is in `game::spawns::creatures_per_cell`.)
     pub fn max_health(self) -> i32 {
         match self {
+            // Plains and meadow: peaceful until attacked.
             Kind::Deer => 8,
-            Kind::Wolf => 9,
             Kind::Boar => 10,
-            Kind::BogZombie => 16,
-            Kind::Scorpion => 7,
-            Kind::Golem => 22,
-            Kind::Skeleton => 12,
-            Kind::Yeti => 18,
+            Kind::Wolf => 12,
+            Kind::Scorpion => 15,
+            Kind::BogZombie => 20,
+            Kind::Yeti => 20,
+            Kind::Golem => 24,
+            Kind::Skeleton => 26,
         }
     }
 

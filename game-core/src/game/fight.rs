@@ -89,62 +89,11 @@ impl Game {
         {
             enemy.health = enemy.health.min(target.hp);
         }
+        // A defeated creature's home is empty until the wait is over.
+        for dead in self.enemies.iter().filter(|e| e.health <= 0) {
+            self.defeated.insert(dead.id, spawns::RESPAWN_SECONDS);
+        }
         self.enemies.retain(|e| e.health > 0);
-    }
-
-    /// Keeps a few creatures around the players: every few seconds one may appear a little
-    /// way off one of them, and be the kind that lives in that spot's biome. Ones left far
-    /// behind are removed.
-    fn update_spawns(&mut self, dt: f32) {
-        const MAX_NEARBY: usize = 6;
-        const PER_KIND: usize = 3;
-        const MIN_DISTANCE: f32 = 25.0;
-        const MAX_DISTANCE: f32 = 45.0;
-        const DESPAWN_DISTANCE: f32 = 90.0;
-
-        let count = self.players.len();
-        if count == 0 {
-            return;
-        }
-        let near_anyone = |players: &[PlayerState], p: Vec3, range: f32| {
-            players.iter().any(|pl| {
-                let (dx, dz) = (p.x - pl.body.pos.x, p.z - pl.body.pos.z);
-                Vec3::new(dx, 0.0, dz).length() <= range
-            })
-        };
-        let players = &self.players;
-        self.enemies
-            .retain(|e| near_anyone(players, e.pos(), DESPAWN_DISTANCE));
-
-        self.spawn_timer -= dt;
-        if self.spawn_timer > 0.0 {
-            return;
-        }
-        self.spawn_timer = 3.0;
-        // The limits are per player, so a second player doesn't share the first one's.
-        if self.enemies.len() >= MAX_NEARBY * count {
-            return;
-        }
-        let who = if count > 1 {
-            (self.spawn_dice.unit() * count as f32) as usize % count
-        } else {
-            0
-        };
-        let player = self.players[who].body.pos;
-        let angle = self.spawn_dice.unit() * std::f32::consts::TAU;
-        let distance = MIN_DISTANCE + self.spawn_dice.unit() * (MAX_DISTANCE - MIN_DISTANCE);
-        let (x, z) = (
-            (player.x + angle.cos() * distance).floor() as i32,
-            (player.z + angle.sin() * distance).floor() as i32,
-        );
-        let kind = Kind::for_biome(self.world.biome(x, z));
-        if self.enemies.iter().filter(|e| e.kind == kind).count() >= PER_KIND * count {
-            return;
-        }
-        if let Some(spot) = self.world.standing_spot(x, z) {
-            self.enemies.push(Enemy::new(self.next_enemy_id, kind, spot));
-            self.next_enemy_id += 1;
-        }
     }
 
     /// One frame of enemy behavior: hostile ones chase the closest living player, and once
@@ -154,7 +103,7 @@ impl Game {
         if self.players.is_empty() {
             return;
         }
-        self.update_spawns(dt);
+        self.update_creature_homes(dt);
         for enemy in &mut self.enemies {
             let flat = |p: &PlayerState| {
                 let o = enemy.pos() - p.body.pos;

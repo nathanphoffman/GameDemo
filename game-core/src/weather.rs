@@ -104,11 +104,12 @@ pub struct Weather {
     pub params: Params,
     /// How far the clouds have drifted, in cloud cells.
     pub cloud_offset: [f32; 2],
-    /// The player is in the cold biome, where rain falls as snow. Set by the game each frame.
+    /// The viewer is in the cold biome, where rain falls as snow. Set by whoever draws the
+    /// weather (the host doesn't care).
     pub snowing: bool,
-    /// The biome the player is in. Set by the game each frame.
+    /// The biome the viewer is in. Set by whoever draws the weather.
     pub biome: Biome,
-    /// The camera is under water, so the scene is drawn blue. Set by the game each frame.
+    /// The camera is under water, so the scene is drawn blue. Set by whoever draws the weather.
     pub underwater: bool,
     clock: f32,
     check_interval: f32,

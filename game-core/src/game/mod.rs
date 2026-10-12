@@ -7,6 +7,7 @@ mod blocks;
 mod fight;
 pub mod sights;
 mod snapshot;
+pub mod spawns;
 mod update;
 
 pub use snapshot::{EnemyView, PlayerView, Snapshot, YouView};
@@ -14,7 +15,6 @@ pub use snapshot::{EnemyView, PlayerView, Snapshot, YouView};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::biome::Biome;
 use crate::combat::{Candidate, Combat, Side};
 use crate::effects::{Effect, Fires, STAIR_STEPS};
 use crate::enemy::{Dice, Enemy, Kind, Sight};
@@ -165,10 +165,12 @@ pub struct Game {
     pub fires: Fires,
     players: Vec<PlayerState>,
     dice: Dice,
-    spawn_dice: Dice,
-    /// Seconds until the next try at spawning a creature near a player.
-    spawn_timer: f32,
-    next_enemy_id: u32,
+    /// Where creatures live, worked out per area of the world the first time it is needed.
+    homes: std::collections::HashMap<(i32, i32), Vec<spawns::Home>>,
+    /// Homes whose creature was defeated, and the seconds left until it is back.
+    defeated: std::collections::HashMap<u32, f32>,
+    /// Where the creature that lives near the spawn point is.
+    starter_home: Vec3,
     next_player_id: u32,
     events: Vec<Event>,
 }
@@ -176,20 +178,21 @@ pub struct Game {
 impl Game {
     pub fn new(seed: u32) -> Self {
         let world = World::generate(seed);
-        // A deer close to the spawn point; the rest of the creatures turn up as players explore.
+        // A deer lives close to the spawn point; the rest of the creatures are placed from the
+        // seed (see `spawns`).
         let (cx, cz) = (world::SIZE_X as i32 / 2, world::SIZE_Z as i32 / 2);
-        let enemies = vec![Enemy::new(1, Kind::Deer, world.open_spot(cx - 9, cz - 3))];
+        let starter_home = world.open_spot(cx - 9, cz - 3);
         Game {
             seed,
             world,
-            enemies,
+            enemies: Vec::new(),
             weather: Weather::new(seed ^ 0x5EA7),
             fires: Fires::default(),
             players: Vec::new(),
             dice: Dice::with_seed(seed ^ 0xD1CE),
-            spawn_dice: Dice::with_seed(seed ^ 0x5B4D),
-            spawn_timer: 3.0,
-            next_enemy_id: 2,
+            homes: Default::default(),
+            defeated: Default::default(),
+            starter_home,
             next_player_id: 1,
             events: Vec::new(),
         }

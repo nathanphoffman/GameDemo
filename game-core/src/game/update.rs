@@ -26,13 +26,9 @@ impl Game {
         }
         self.update_enemies(dt);
 
-        // The weather is drawn for (and bent by the biome of) the first player.
-        if let Some(first) = self.players.first() {
-            let (px, pz) = (first.body.pos.x.floor() as i32, first.body.pos.z.floor() as i32);
-            self.weather.biome = self.world.biome(px, pz);
-            self.weather.snowing = self.weather.biome == Biome::Snow;
-            self.weather.underwater = self.world.in_water(first.body.eye());
-        }
+        // Only which weather it is lives here. How it looks to a player (snow in the cold,
+        // dust storms in the desert, blue under water) depends on where they are, so each
+        // player's own game works that out.
         self.weather.update(dt);
 
         self.update_background(dt);
