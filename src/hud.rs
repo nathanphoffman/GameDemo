@@ -56,6 +56,7 @@ fn glyph(c: char) -> [u8; 5] {
         'R' => [0b110, 0b101, 0b110, 0b101, 0b101],
         'S' => [0b011, 0b100, 0b010, 0b001, 0b110],
         'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+        'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
         'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
         'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
         'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
@@ -265,6 +266,8 @@ pub struct HudInfo<'a> {
     pub converting: Option<(usize, f32)>,
     /// Ctrl is held, so the resource rows can be clicked.
     pub ctrl_held: bool,
+    /// Name of the current weather, shown in the upper right corner.
+    pub weather_label: &'static str,
     /// How many times faster than normal conversion is running (1, 2 with a forge nearby, 4
     /// with a furnace).
     pub conversion_boost: u32,
@@ -337,6 +340,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         menu,
         converting,
         ctrl_held,
+        weather_label,
         conversion_boost,
         player_roll,
         enemy_rolls,
@@ -425,6 +429,12 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
             &dense_count.to_string(),
             white,
         );
+    }
+
+    // Upper right: the current weather.
+    {
+        let text_width = weather_label.chars().count() as f32 * 4.0 * scale - scale;
+        b.text(w - margin - text_width, margin, scale, weather_label, [0.85, 0.9, 1.0]);
     }
 
     // The apply menu, in the middle of the screen.
@@ -523,6 +533,7 @@ mod tests {
                     menu: Some([Some("FIRE"); KINDS]),
                     converting: Some((2, 0.5)),
                     ctrl_held: true,
+                    weather_label: "HEAVY RAIN",
                     conversion_boost: 4,
                     player_roll: Some(roll),
                     enemy_rolls: &four,
@@ -541,6 +552,7 @@ mod tests {
                 menu: None,
                 converting: None,
                 ctrl_held: false,
+                weather_label: "SUNNY",
                 conversion_boost: 1,
                 player_roll: None,
                 enemy_rolls: &[],

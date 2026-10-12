@@ -6,6 +6,7 @@ mod music;
 mod player;
 mod resources;
 mod textures;
+mod weather;
 mod world;
 
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use effects::{Effect, Fires};
 use enemy::{Dice, Enemy, Kind, Sight};
 use player::Player;
 use resources::{Converter, Resources};
+use weather::Weather;
 use world::{Vertex, World};
 
 const WALK_SPEED: f32 = 5.0;
@@ -56,7 +58,12 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 struct Globals {
     view_proj: [[f32; 4]; 4],
     inv_view_proj: [[f32; 4]; 4],
+    /// Camera position and the time in seconds.
     cam: [f32; 4],
+    /// Fog start, fog end, overcast, dimming.
+    fog: [f32; 4],
+    /// Cloud drift (x, z); the rest is unused.
+    sky: [f32; 4],
 }
 
 #[derive(Default)]
@@ -104,6 +111,9 @@ struct Gfx {
     sky_pipeline: wgpu::RenderPipeline,
     block_pipeline: wgpu::RenderPipeline,
     hud_pipeline: wgpu::RenderPipeline,
+    weather_vertices: wgpu::Buffer,
+    weather_indices: wgpu::Buffer,
+    weather_index_count: u32,
     crack_pipeline: wgpu::RenderPipeline,
     crack_vertices: wgpu::Buffer,
     crack_indices: wgpu::Buffer,
@@ -288,7 +298,8 @@ impl Gfx {
                              fs: &str,
                              buffers: &[wgpu::VertexBufferLayout],
                              depth_write: bool,
-                             depth_test: bool| {
+                             depth_test: bool,
+                             blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(vs),
                 layout: Some(layout),
@@ -302,7 +313,11 @@ impl Gfx {
                     module: &shader,
                     entry_point: Some(fs),
                     compilation_options: Default::default(),
-                    targets: &[Some(config.format.into())],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -336,7 +351,8 @@ impl Gfx {
             attributes: &hud_attrs,
         };
 
-        let sky_pipeline = make_pipeline(&layout, "sky_vs", "sky_fs", &[], false, false);
+        let sky_pipeline = make_pipeline(&layout, "sky_vs", "sky_fs", &[], false, false, None);
+
         let block_pipeline = make_pipeline(
             &layout,
             "block_vs",
@@ -344,11 +360,12 @@ impl Gfx {
             &[block_layout.clone()],
             true,
             true,
+            None,
         );
         let crack_pipeline =
-            make_pipeline(&layout, "block_vs", "crack_fs", &[block_layout], false, true);
+            make_pipeline(&layout, "block_vs", "crack_fs", &[block_layout], false, true, None);
         let hud_pipeline =
-            make_pipeline(&empty_layout, "hud_vs", "hud_fs", &[hud_layout], false, false);
+            make_pipeline(&empty_layout, "hud_vs", "hud_fs", &[hud_layout], false, false, None);
 
         let mesh_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
@@ -396,6 +413,17 @@ impl Gfx {
             contents: bytemuck::cast_slice(&enemy_index_list),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let weather_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("weather streaks"),
+            size: (weather::MAX_STREAK_VERTICES * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let weather_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("weather indices"),
+            contents: bytemuck::cast_slice(&enemy::indices(weather::MAX_STREAK_VERTICES)),
+            usage: wgpu::BufferUsages::INDEX,
+        });
         let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hud"),
             size: (MAX_HUD_VERTICES * std::mem::size_of::<HudVertex>()) as u64,
@@ -415,6 +443,9 @@ impl Gfx {
             sky_pipeline,
             block_pipeline,
             hud_pipeline,
+            weather_vertices,
+            weather_indices,
+            weather_index_count: 0,
             crack_pipeline,
             crack_vertices,
             crack_indices,
@@ -492,7 +523,7 @@ impl Gfx {
         self.mesh_index_count = indices.len() as u32;
     }
 
-    fn render(&mut self, eye: Vec3, forward: Vec3, time: f32, hud: &[HudVertex]) {
+    fn render(&mut self, eye: Vec3, forward: Vec3, time: f32, weather: &Weather, hud: &[HudVertex]) {
         let aspect = self.config.width as f32 / self.config.height as f32;
         let view = Mat4::look_to_rh(eye, forward, Vec3::Y);
         let proj = Mat4::perspective_rh(FOV_Y_DEGREES.to_radians(), aspect, 0.05, 1000.0);
@@ -502,7 +533,20 @@ impl Gfx {
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             // The fourth number is the time, which makes the clouds drift.
             cam: [eye.x, eye.y, eye.z, time],
+            fog: [
+                weather.params.fog_start,
+                weather.params.fog_end,
+                weather.params.overcast,
+                weather.params.dim,
+            ],
+            sky: [weather.cloud_offset[0], weather.cloud_offset[1], 0.0, 0.0],
         };
+
+        // Rain and wind streaks, placed in the world around the player.
+        let streaks = weather::streak_mesh(eye, time, weather.params.rain, weather.params.wind);
+        self.queue
+            .write_buffer(&self.weather_vertices, 0, bytemuck::cast_slice(&streaks));
+        self.weather_index_count = (streaks.len() / 4 * 6) as u32;
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         let hud = &hud[..hud.len().min(MAX_HUD_VERTICES)];
@@ -576,6 +620,15 @@ impl Gfx {
                 pass.draw_indexed(0..36, 0, 0..1);
             }
 
+            // Rain and wind streaks: plain textured quads in the world, hidden by anything in
+            // front of them.
+            if self.weather_index_count > 0 {
+                pass.set_pipeline(&self.crack_pipeline);
+                pass.set_vertex_buffer(0, self.weather_vertices.slice(..));
+                pass.set_index_buffer(self.weather_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.weather_index_count, 0, 0..1);
+            }
+
             pass.set_pipeline(&self.hud_pipeline);
             pass.set_vertex_buffer(0, self.hud_buf.slice(..));
             pass.draw(0..hud.len() as u32, 0..1);
@@ -596,6 +649,7 @@ struct App {
     last_frame: Instant,
     /// When the game started, for things that move with time (the clouds).
     started: Instant,
+    weather: Weather,
     resources: Resources,
     converter: Converter,
     fires: Fires,
@@ -1161,6 +1215,8 @@ impl ApplicationHandler for App {
 
                 // One crack stage, halfway through the mining time.
                 let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+                self.weather.update(dt);
+
                 // The conversion pipeline and the fires work in the background. Standing
                 // near a forge makes the conversion twice as fast.
                 let eye = self.player.eye();
@@ -1254,6 +1310,7 @@ impl ApplicationHandler for App {
                                 .selected()
                                 .map(|kind| (kind, self.converter.fraction())),
                             ctrl_held: self.keys.ctrl,
+                            weather_label: self.weather.kind.label(),
                             conversion_boost,
                             player_roll: self.combat.player_roll.map(|r| r.view()),
                             enemy_rolls: &enemy_rolls,
@@ -1261,7 +1318,7 @@ impl ApplicationHandler for App {
                         },
                     );
                     let time = self.started.elapsed().as_secs_f32();
-                    gfx.render(self.player.eye(), self.player.forward(), time, &hud);
+                    gfx.render(self.player.eye(), self.player.forward(), time, &self.weather, &hud);
                 }
             }
             _ => {}
@@ -1306,6 +1363,7 @@ fn main() {
         keys: Keys::default(),
         last_frame: Instant::now(),
         started: Instant::now(),
+        weather: Weather::new(seed ^ 0x5EA7),
         // A big pile of everything to try things out with. Use `Resources::default()` for a
         // normal start.
         resources: Resources::test_kit(),

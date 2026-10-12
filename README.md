@@ -47,6 +47,19 @@ Hold the left mouse button while the crosshair is on a block. Every 0.55 seconds
 
 Each resource row shows its count, then a triangle of the same color with the count of its dense version. A single conversion pipeline works on one resource at a time. Hold Ctrl (the mouse is freed and the rows light up) and click a row to select it; click it again to turn the pipeline off. Every 10 seconds, if you have 4 of the selected resource, they are turned into 1 dense one. The row's backing fills as the wait goes. Dense resources aren't used for anything yet.
 
+## Weather
+
+The weather is one of: sunny, fog, light rain, heavy rain, or windy. It is shown in the upper right corner and fades in over a few seconds when it changes.
+
+- **Fog:** thick grey fog closes in to about 55 blocks.
+- **Light and heavy rain:** the sky goes overcast and the world darkens, with rain falling around you and shorter visibility (heavy is much more of everything). The rain leans over in the wind.
+- **Windy:** clouds race across the sky and long streaks of wind blow past, each at a slightly different angle.
+
+The rain and wind are real streaks in the world around you, so they stay put as you turn and walk, and terrain hides them. They are not an overlay on the screen.
+- **Sunny:** the normal clear sky.
+
+How often it changes is set at the top of `src/weather.rs`. For normal play it should be a check every 60 seconds with a 10% chance of changing; **right now it is set for testing to a 100% chance every 15 seconds**, so change `CHECK_INTERVAL_SECONDS` to 60.0 and `CHANGE_CHANCE` to 0.10 when you're done testing.
+
 ## Test kit
 
 You start with 100 of every resource and 25 of every dense one, to make trying things out easy. To go back to a normal start, change `Resources::test_kit()` to `Resources::default()` in `main` in `src/main.rs`.
@@ -101,6 +114,7 @@ You have 50 HP (the bar at the bottom of the screen). Enemies have a health bar 
 | `src/effects.rs` | What applying a resource to a block does, and burning timers |
 | `src/resources.rs` | What each mined block gives you |
 | `src/player.rs` | Movement, gravity, jumping, collision |
+| `src/weather.rs` | The weather: what it is, when it changes, how it looks |
 | `src/textures.rs` | Block textures, generated in code |
 | `src/shader.wgsl` | Sky, block, and crosshair shaders |
 
