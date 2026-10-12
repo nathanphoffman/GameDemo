@@ -82,9 +82,9 @@ Look at a block and press E (or middle click) to open the apply menu. The mouse 
 | Dense green | a wooden floor | Puts a house plant on top of it. |
 | Dense black (carbon) | a wooden floor | Builds a forge on top of it. While you are within 6 blocks of a forge, the resource converter runs twice as fast ("X2" shows next to the row). |
 | Dense black (carbon) | a stone floor | Builds a furnace on top of it. Within 10 blocks of a furnace the converter runs four times as fast ("X4"). A furnace takes priority over a forge; they don't stack. |
-| Dense brown (wood) | a wooden floor | Builds a staircase of 6 wooden floor steps climbing away from it in the direction you are facing, if there is room. |
+| Dense brown (wood) | a wooden floor | Builds a staircase of 6 wooden floor steps climbing away from it in the direction you are facing, if there is room. Costs 6 dense brown, one per step. |
 
-Mining a block that is still burning, a water block, or any of the crafted blocks gives nothing, and none of them can be placed or bought (except wooden floor cubes, see Building). Trees need a clear column above the block, and things built on a floor need the cell above it free. The menu only labels the rows that would work.
+Mining a block that is still burning or a water block gives nothing. Mining something you built (a wooden or stone floor, forge, furnace, house plant, or a stair step) takes it apart exactly like mining any block, and gives you back the dense resource it cost: one dense brown per wooden floor cube, one dense grey per stone floor, one dense black per forge or furnace, one dense green per house plant. A staircase costs one dense brown per step (the same as placing the same wooden floor cubes one at a time), so each step gives one back. None of them can be placed or bought except wooden floor cubes (see Building), so there is no way to make resources by building and mining. Trees need a clear column above the block, and things built on a floor need the cell above it free. The menu only labels the rows that would work.
 
 ## Building
 

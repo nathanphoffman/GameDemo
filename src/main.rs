@@ -26,7 +26,7 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use hud::{HudInfo, HudVertex, MAX_HUD_VERTICES};
 use combat::{Candidate, Combat, Side, MAX_PLAYER_HP};
-use effects::{Effect, Fires};
+use effects::{Effect, Fires, STAIR_STEPS};
 use enemy::{Dice, Enemy, Kind, Sight};
 use player::Player;
 use resources::{Converter, Resources};
@@ -47,8 +47,6 @@ const NEAR_RANGE: f32 = 3.0;
 // further away.
 const FORGE_RANGE: f32 = 6.0;
 const FURNACE_RANGE: f32 = 10.0;
-// How many steps a staircase has (each is one block further and one block higher).
-const STAIR_STEPS: i32 = 6;
 // After a round ends, the next one can't start for this long.
 const ROUND_PAUSE: f32 = 2.0;
 // How fast the health bar's draining chunk catches up, in hp per second.
@@ -743,7 +741,8 @@ impl App {
         let Some(effect) = self.effect_at(kind, (x, y, z)) else {
             return false;
         };
-        if !self.resources.spend_dense(kind) {
+        // A staircase takes one per step; everything else takes one.
+        if !self.resources.spend_dense(kind, effect.dense_cost()) {
             return false;
         }
         use world::Block;
@@ -1322,8 +1321,12 @@ impl ApplicationHandler for App {
                 // With a dense resource selected: what right click would build on the block
                 // the crosshair is on, written over that block.
                 let target_label = match (self.selected_dense, self.block_in_sights()) {
-                    (Some(kind), Some(pos)) if !self.ui_open() && self.resources.dense[kind] > 0 => {
-                        self.effect_at(kind, pos).and_then(|effect| {
+                    (Some(kind), Some(pos)) if !self.ui_open() => {
+                        // Only if there is enough of it (a staircase needs one per step).
+                        let enough = |effect: &Effect| {
+                            self.resources.dense[kind] >= effect.dense_cost()
+                        };
+                        self.effect_at(kind, pos).filter(enough).and_then(|effect| {
                             let (width, height) = self
                                 .gfx
                                 .as_ref()
@@ -1352,7 +1355,9 @@ impl ApplicationHandler for App {
                 let menu_labels = self.menu.map(|pos| {
                     let mut labels = [None; 5];
                     for (kind, label) in labels.iter_mut().enumerate() {
-                        *label = self.effect_at(kind, pos).map(|e| e.label());
+                        *label = self
+                            .effect_at(kind, pos)
+                            .map(|e| (e.label(), e.dense_cost()));
                     }
                     labels
                 });

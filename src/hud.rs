@@ -260,8 +260,8 @@ pub struct HudInfo<'a> {
     /// The dense (triangle) version of each.
     pub dense: [u32; KINDS],
     /// The apply menu, if open: for each dense resource, the name of what applying it to the
-    /// chosen block would do (None if nothing).
-    pub menu: Option<[Option<&'static str>; KINDS]>,
+    /// chosen block would do and how many it uses (None if nothing).
+    pub menu: Option<[Option<(&'static str, u32)>; KINDS]>,
     /// Which resource the converter is working on, and how far through its wait (0 to 1).
     pub converting: Option<(usize, f32)>,
     /// Ctrl is held, so the resource rows can be clicked.
@@ -517,7 +517,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         b.text(x0 + 3.0 * scale, y0 + 3.0 * scale, scale, "APPLY", white);
         for row in 0..KINDS {
             let top = y0 + MENU_TITLE_HEIGHT * scale + row as f32 * MENU_ROW_PITCH * scale;
-            let usable = labels[row].is_some() && dense[row] > 0;
+            let usable = labels[row].is_some_and(|(_, cost)| dense[row] >= cost);
             let backing = if usable { [0.45, 0.33, 0.06] } else { [0.20, 0.20, 0.25] };
             b.rect(x0 + 2.0 * scale, top, (MENU_WIDTH - 4.0) * scale, 8.0 * scale, backing);
             let color = RESOURCE_COLORS[row];
@@ -540,7 +540,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
                 color,
             );
             b.text(x0 + 16.0 * scale, top + 1.5 * scale, scale, &dense[row].to_string(), white);
-            if let Some(label) = labels[row] {
+            if let Some((label, _)) = labels[row] {
                 let tint = if usable { [1.0, 0.65, 0.2] } else { [0.5, 0.5, 0.55] };
                 b.text(x0 + 34.0 * scale, top + 1.5 * scale, scale, label, tint);
             }
@@ -602,7 +602,7 @@ mod tests {
                 let info = HudInfo {
                     resources: [99999; KINDS],
                     dense: [9999; KINDS],
-                    menu: Some([Some("FIRE"); KINDS]),
+                    menu: Some([Some(("FIRE", 1)); KINDS]),
                     converting: Some((2, 0.5)),
                     ctrl_held: true,
                     weather_label: "HEAVY RAIN",

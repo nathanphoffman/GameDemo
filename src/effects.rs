@@ -10,6 +10,9 @@ pub const SEED: usize = 2; // dense green
 pub const WOOD: usize = 3; // dense brown
 pub const CARBON: usize = 4; // dense black
 
+/// How many steps a staircase has (each is one block further and one block higher).
+pub const STAIR_STEPS: i32 = 6;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effect {
     /// Sets the block on fire; it becomes coal when the fire dies down.
@@ -53,6 +56,15 @@ impl Effect {
             Effect::PlantHouse => "PLANT",
             Effect::BuildFurnace => "FURNACE",
             Effect::BuildStairs => "STAIRS",
+        }
+    }
+
+    /// How many of the dense resource it uses up. Everything takes one, except a staircase,
+    /// which takes one per step (a step is a wooden floor cube, and those cost one each).
+    pub fn dense_cost(self) -> u32 {
+        match self {
+            Effect::BuildStairs => STAIR_STEPS as u32,
+            _ => 1,
         }
     }
 
@@ -224,6 +236,51 @@ mod tests {
         assert_eq!(cycle_selection(None, false), Some(4));
         assert_eq!(cycle_selection(Some(0), false), None);
         assert_eq!(cycle_selection(Some(3), false), Some(2));
+    }
+
+    #[test]
+    fn mining_what_you_built_gives_back_exactly_what_it_cost() {
+        use Block::*;
+        // (effect, dense kind used, what it builds, how many of that block it builds)
+        let builds = [
+            (Effect::LayFloor, WOOD, WoodFloor, 1),
+            (Effect::StoneFloor, FLINT, StoneFloor, 1),
+            (Effect::BuildForge, CARBON, Forge, 1),
+            (Effect::BuildFurnace, CARBON, Furnace, 1),
+            (Effect::PlantHouse, SEED, HousePlant, 1),
+            (Effect::BuildStairs, WOOD, WoodFloor, STAIR_STEPS as u32),
+        ];
+        for (effect, kind, block, count) in builds {
+            let mut r = Resources::default();
+            for _ in 0..count {
+                r.gain(block); // mine each block that was built
+            }
+            let mut expected = [0u32; 5];
+            expected[kind] = effect.dense_cost();
+            assert_eq!(r.dense, expected, "{effect:?}");
+            // Nothing raw comes back: only the dense resource that was used.
+            assert_eq!(r.as_array(), [0; 5], "{effect:?}");
+        }
+    }
+
+    #[test]
+    fn only_staircases_cost_more_than_one() {
+        assert_eq!(Effect::BuildStairs.dense_cost(), STAIR_STEPS as u32);
+        for effect in [
+            Effect::Ignite,
+            Effect::Douse,
+            Effect::Freeze,
+            Effect::Seed,
+            Effect::GrowOak,
+            Effect::GrowPine,
+            Effect::LayFloor,
+            Effect::StoneFloor,
+            Effect::BuildForge,
+            Effect::BuildFurnace,
+            Effect::PlantHouse,
+        ] {
+            assert_eq!(effect.dense_cost(), 1, "{effect:?}");
+        }
     }
 
     #[test]

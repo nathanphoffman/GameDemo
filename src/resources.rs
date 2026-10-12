@@ -57,7 +57,20 @@ impl Resources {
         }
     }
 
-    /// Adds what mining `block` yields.
+    /// The dense resource that was used up to build this crafted block, which mining it gives
+    /// back (0 = grey ... 4 = black). One of each, matching what the apply effects cost.
+    fn dense_refund(block: Block) -> Option<usize> {
+        match block {
+            Block::WoodFloor => Some(3),
+            Block::StoneFloor => Some(0),
+            Block::Forge | Block::Furnace => Some(4),
+            Block::HousePlant => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Adds what mining `block` yields: the raw resources for natural blocks, or the dense
+    /// resource that went into building a crafted one.
     pub fn gain(&mut self, block: Block) {
         let v = Self::value_of(block);
         self.grey += v.grey;
@@ -65,6 +78,9 @@ impl Resources {
         self.green += v.green;
         self.brown += v.brown;
         self.black += v.black;
+        if let Some(kind) = Self::dense_refund(block) {
+            self.dense[kind] += 1;
+        }
     }
 
     /// Blocks that are paid for with one dense resource instead of raw ones, and which kind
@@ -118,11 +134,12 @@ impl Resources {
         true
     }
 
-    /// Uses up one dense resource of `kind` (0 = grey ... 4 = black), if there is one.
-    pub fn spend_dense(&mut self, kind: usize) -> bool {
+    /// Uses up `count` dense resources of `kind` (0 = grey ... 4 = black), if there are that
+    /// many. Takes nothing otherwise.
+    pub fn spend_dense(&mut self, kind: usize, count: u32) -> bool {
         match self.dense.get_mut(kind) {
-            Some(n) if *n > 0 => {
-                *n -= 1;
+            Some(n) if *n >= count => {
+                *n -= count;
                 true
             }
             _ => false,
@@ -341,12 +358,14 @@ mod tests {
     #[test]
     fn spending_dense_resources() {
         let mut r = Resources::default();
-        assert!(!r.spend_dense(0));
-        r.dense[0] = 2;
-        assert!(r.spend_dense(0));
-        assert!(r.spend_dense(0));
-        assert!(!r.spend_dense(0));
-        assert!(!r.spend_dense(9), "no such kind");
+        assert!(!r.spend_dense(0, 1));
+        r.dense[0] = 3;
+        assert!(r.spend_dense(0, 1));
+        assert!(!r.spend_dense(0, 3), "only 2 left");
+        assert_eq!(r.dense[0], 2, "nothing taken on failure");
+        assert!(r.spend_dense(0, 2));
+        assert!(!r.spend_dense(0, 1));
+        assert!(!r.spend_dense(9, 1), "no such kind");
     }
 
     #[test]
@@ -358,17 +377,20 @@ mod tests {
     }
 
     #[test]
-    fn crafted_blocks_give_nothing_and_cannot_be_placed() {
-        let mut r = Resources::default();
-        for block in [
-            Block::StoneFloor,
-            Block::Forge,
-            Block::Furnace,
-            Block::HousePlant,
+    fn crafted_blocks_cannot_be_placed_and_give_back_their_dense_resource() {
+        for (block, kind) in [
+            (Block::StoneFloor, 0),
+            (Block::HousePlant, 2),
+            (Block::Forge, 4),
+            (Block::Furnace, 4),
         ] {
-            r.gain(block);
-            assert_eq!(r, Resources::default(), "{block:?}");
+            let mut r = Resources::default();
             assert!(!r.can_afford(block), "{block:?}");
+            r.gain(block);
+            let mut expected = [0u32; 5];
+            expected[kind] = 1;
+            assert_eq!(r.dense, expected, "{block:?}");
+            assert_eq!(r.as_array(), [0; 5], "no raw resources, {block:?}");
         }
     }
 
@@ -391,8 +413,10 @@ mod tests {
         assert!(r.spend(Block::WoodFloor));
         assert!(!r.can_afford(Block::WoodFloor));
 
-        // Mining one still gives nothing back, so there is no way to profit.
+        // Mining one gives that dense brown back, no more: placing and mining is a wash.
         r.gain(Block::WoodFloor);
-        assert_eq!((r.dense[3], r.brown, r.grey), (0, 50, 50));
+        assert_eq!((r.dense[3], r.brown, r.grey), (1, 50, 50));
+        assert!(r.spend(Block::WoodFloor));
+        assert_eq!(r.dense[3], 0);
     }
 }
