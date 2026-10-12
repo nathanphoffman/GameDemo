@@ -27,7 +27,9 @@ cargo run --release -- 42
 | Left click | Attack a passive animal (deer) if you are close and looking at it |
 | Left click (hold) | Mine the block the crosshair is on |
 | Right click | Place a block against the face the crosshair is on |
-| Esc | Quit |
+| Ctrl (hold) + left click | On a resource in the list: pick what the converter works on |
+| Middle click or E | Open the apply menu on the block the crosshair is on |
+| Esc | Close the apply menu, or quit |
 
 ## Mining
 
@@ -37,12 +39,36 @@ Hold the left mouse button while the crosshair is on a block. Every 0.55 seconds
 | --- | --- |
 | Grey | +1 for any earth block (dirt, grass, snow, stone) |
 | White | +1 more for a snow block |
-| Green | +1 more for a grass block, +2 for a leaf block |
-| Brown | +1 for a tree trunk block (the rarest) |
+| Green | +1 more for a grass block, +2 for an oak leaf block, +1 for a pine needle block |
+| Brown | +1 for an oak trunk block, +2 for a pine trunk block |
+| Black | +1 for a coal block (see below) |
+
+## Converting
+
+Each resource row shows its count, then a triangle of the same color with the count of its dense version. A single conversion pipeline works on one resource at a time. Hold Ctrl (the mouse is freed and the rows light up) and click a row to select it; click it again to turn the pipeline off. Every 10 seconds, if you have 4 of the selected resource, they are turned into 1 dense one. The row's backing fills as the wait goes. Dense resources aren't used for anything yet.
+
+## Applying resources
+
+Look at a block and press E (or middle click) to open the apply menu. The mouse is freed and a list of your dense (triangle) resources appears. Click one to apply it to that block; click outside the menu or press Esc to close it. If a resource does nothing to that block, nothing is used up.
+
+| Apply this | to this | What happens |
+| --- | --- | --- |
+| Flint (dense grey) | grass, leaves, or wood | Sets it on fire. After 10 seconds it burns out into a black coal block (+1 black when mined). |
+| Dense white | a burning block | Puts the fire out and leaves a water block instead of coal. |
+| Dense white | grass | Turns it into snow. |
+| Dense green (seed) | dirt | Turns it into grass. |
+| Dense green | grass | Grows an oak, the native tree of the grasslands, if there is room. |
+| Dense green | snow | Grows a pine, the native tree of the snow, if there is room. |
+| Dense brown (wood) | grass, dirt, snow or stone | Turns it into a wooden floor. |
+| Flint (dense grey) | a wooden floor | Turns it into a stone floor (for later). |
+| Dense green | a wooden floor | Puts a house plant on top of it. |
+| Dense black (carbon) | a wooden floor | Builds a forge on top of it. While you are within 6 blocks of a forge, the resource converter runs twice as fast ("X2" shows next to the row). |
+
+Mining a block that is still burning, a water block, or any of the crafted blocks gives nothing, and none of them can be placed or bought. Trees need a clear column above the block, and things built on a floor need the cell above it free. The menu only labels the rows that would work.
 
 ## Building
 
-Right click places a block instantly, against the face of the block the crosshair is on (within 5 blocks). It is the same type as that block, and it costs what mining that type gives you: dirt or stone cost 1 grey, grass 1 grey + 1 green, snow 1 grey + 1 white, a trunk 1 brown, a leaf 2 green. Nothing is placed if you can't afford it, if the spot is inside you or a creature, or if you are looking at a creature.
+Right click places a block instantly, against the face of the block the crosshair is on (within 5 blocks). It is the same type as that block, and it costs what mining that type gives you: dirt or stone cost 1 grey, grass 1 grey + 1 green, snow 1 grey + 1 white, an oak trunk 1 brown, a pine trunk 2 brown, an oak leaf 2 green, a pine needle 1 green. Nothing is placed if you can't afford it, if the spot is inside you or a creature, or if you are looking at a creature.
 
 ## Fighting
 
@@ -66,6 +92,7 @@ You have 50 HP (the bar at the bottom of the screen). Enemies have a health bar 
 | `src/enemy.rs` | Skeleton and deer models, chasing, health bars, dice, ray-vs-box test |
 | `src/combat.rs` | Rounds: who rolls, who gets hit, when dice land |
 | `src/hud.rs` | Crosshair, rock counter, and mode label (tiny built-in pixel font) |
+| `src/effects.rs` | What applying a resource to a block does, and burning timers |
 | `src/resources.rs` | What each mined block gives you |
 | `src/player.rs` | Movement, gravity, jumping, collision |
 | `src/textures.rs` | Block textures, generated in code |

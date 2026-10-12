@@ -16,8 +16,43 @@ pub enum Block {
     Snow,
     Stone,
     Log,
+    PineLog,
     Leaves,
     PineLeaves,
+    /// On fire; turns into `Coal` after a while.
+    Burning,
+    Coal,
+    /// Made by dousing a fire with ice.
+    Water,
+    /// Man-made. Wooden floor is what the other crafted things are built on.
+    WoodFloor,
+    StoneFloor,
+    /// Speeds up converting resources while the player is near.
+    Forge,
+    HousePlant,
+}
+
+#[cfg(test)]
+impl Block {
+    /// Every block type, for tests that check them all.
+    pub const ALL: [Block; 16] = [
+        Block::Air,
+        Block::Grass,
+        Block::Dirt,
+        Block::Snow,
+        Block::Stone,
+        Block::Log,
+        Block::PineLog,
+        Block::Leaves,
+        Block::PineLeaves,
+        Block::Burning,
+        Block::Coal,
+        Block::Water,
+        Block::WoodFloor,
+        Block::StoneFloor,
+        Block::Forge,
+        Block::HousePlant,
+    ];
 }
 
 #[repr(C)]
@@ -252,8 +287,46 @@ impl World {
         }
     }
 
+    /// Trunk height for a tree, from a roll in 0..1: oaks are 4 or 5, pines 6 to 8.
+    fn trunk_height(pine: bool, size_roll: f32) -> i32 {
+        if pine {
+            6 + (size_roll * 3.0) as i32
+        } else {
+            4 + (size_roll * 2.0) as i32
+        }
+    }
+
+    /// Whether a tree could grow on the block at (x, y, z): its trunk column has to be open
+    /// air, and it has to be clear of the world's edges.
+    pub fn tree_fits(&self, x: i32, y: i32, z: i32, pine: bool) -> bool {
+        let trunk = Self::trunk_height(pine, Self::tree_roll(x, z));
+        let inside = x >= 3 && z >= 3 && x + 3 < SIZE_X as i32 && z + 3 < SIZE_Z as i32;
+        inside
+            && y + 1 + trunk + 2 < SIZE_Y as i32
+            && (1..=trunk).all(|dy| self.get(x, y + dy, z) == Block::Air)
+    }
+
+    /// Grows a tree on top of the block at (x, y, z), if there is room. The same spot always
+    /// gives the same size of tree.
+    pub fn grow_tree(&mut self, x: i32, y: i32, z: i32, pine: bool) -> bool {
+        if !self.tree_fits(x, y, z, pine) {
+            return false;
+        }
+        let roll = Self::tree_roll(x, z);
+        if pine {
+            self.plant_pine(x, y + 1, z, roll);
+        } else {
+            self.plant_oak(x, y + 1, z, roll);
+        }
+        true
+    }
+
+    fn tree_roll(x: i32, z: i32) -> f32 {
+        hash(x as u32, z as u32, 0x7233)
+    }
+
     fn plant_oak(&mut self, x: i32, ground: i32, z: i32, size_roll: f32) {
-        let trunk = 4 + (size_roll * 2.0) as i32; // 4 or 5
+        let trunk = Self::trunk_height(false, size_roll);
         for dy in 0..trunk {
             self.set_if_air(x, ground + dy, z, Block::Log);
         }
@@ -272,9 +345,9 @@ impl World {
     }
 
     fn plant_pine(&mut self, x: i32, ground: i32, z: i32, size_roll: f32) {
-        let trunk = 6 + (size_roll * 3.0) as i32; // 6 to 8
+        let trunk = Self::trunk_height(true, size_roll);
         for dy in 0..trunk {
-            self.set_if_air(x, ground + dy, z, Block::Log);
+            self.set_if_air(x, ground + dy, z, Block::PineLog);
         }
         // Tiered cone: widest near the bottom, with a single needle at the very top.
         let top = ground + trunk;
@@ -405,6 +478,30 @@ impl World {
         }
     }
 
+    /// Whether there is a `block` within `radius` of `center` (measured to block centers).
+    pub fn block_within(&self, center: Vec3, radius: f32, block: Block) -> bool {
+        let r = radius.ceil() as i32;
+        let (cx, cy, cz) = (
+            center.x.floor() as i32,
+            center.y.floor() as i32,
+            center.z.floor() as i32,
+        );
+        for y in cy - r..=cy + r {
+            for z in cz - r..=cz + r {
+                for x in cx - r..=cx + r {
+                    if self.get(x, y, z) != block {
+                        continue;
+                    }
+                    let to = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center;
+                    if to.length() <= radius {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Puts a block in an empty cell inside the world. Returns whether it was placed.
     pub fn place_block(&mut self, x: i32, y: i32, z: i32, block: Block) -> bool {
         let inside = x >= 0
@@ -414,6 +511,15 @@ impl World {
             && y < SIZE_Y as i32
             && z < SIZE_Z as i32;
         if !inside || block == Block::Air || self.get(x, y, z) != Block::Air {
+            return false;
+        }
+        self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
+        true
+    }
+
+    /// Swaps an existing block for another (e.g. grass for fire). Returns whether it did.
+    pub fn replace_block(&mut self, x: i32, y: i32, z: i32, block: Block) -> bool {
+        if block == Block::Air || self.get(x, y, z) == Block::Air {
             return false;
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
@@ -576,8 +682,17 @@ impl World {
                             (Block::Stone, _) => 5.0,
                             (Block::Log, 1) => 6.0,
                             (Block::Log, _) => 7.0,
+                            (Block::PineLog, 1) => 20.0,
+                            (Block::PineLog, _) => 21.0,
                             (Block::Leaves, _) => 8.0,
                             (Block::PineLeaves, _) => 9.0,
+                            (Block::Burning, _) => 22.0,
+                            (Block::Coal, _) => 23.0,
+                            (Block::Water, _) => 24.0,
+                            (Block::WoodFloor, _) => 25.0,
+                            (Block::StoneFloor, _) => 26.0,
+                            (Block::Forge, _) => 27.0,
+                            (Block::HousePlant, _) => 28.0,
                             _ => 2.0,
                         };
                         let base = vertices.len() as u32;
@@ -659,11 +774,12 @@ mod tests {
                     let ground = w.heights[z * SIZE_X + x] as i32;
                     let (xi, zi) = (x as i32, z as i32);
                     let below = w.get(xi, ground - 1, zi);
-                    let has_tree = w.get(xi, ground, zi) == Block::Log;
-                    if has_tree && below == Block::Grass {
+                    let above = w.get(xi, ground, zi);
+                    let has_tree = above == Block::Log || above == Block::PineLog;
+                    if above == Block::Log && below == Block::Grass {
                         oaks += 1;
                     }
-                    if has_tree && below == Block::Snow {
+                    if above == Block::PineLog && below == Block::Snow {
                         pines += 1;
                     }
                     if below == Block::Snow {
@@ -756,5 +872,61 @@ mod tests {
         let again = w.raycast_face(eye, Vec3::NEG_Y, 5.0).unwrap();
         assert_eq!(again.block, place);
         assert_eq!(again.place, Some((place.0, place.1 + 1, place.2)));
+    }
+
+    #[test]
+    fn replace_block_only_swaps_existing_blocks() {
+        let mut w = World::generate(5);
+        let s = w.spawn_point();
+        let (x, y, z) = (s.x.floor() as i32, s.y.floor() as i32 - 1, s.z.floor() as i32);
+        assert_ne!(w.get(x, y, z), Block::Air);
+        assert!(w.replace_block(x, y, z, Block::Burning));
+        assert_eq!(w.get(x, y, z), Block::Burning);
+        assert!(!w.replace_block(x, y + 5, z, Block::Coal), "nothing there to replace");
+        assert!(!w.replace_block(x, y, z, Block::Air));
+    }
+
+    #[test]
+    fn trees_grow_on_open_grass_and_not_where_blocked() {
+        let mut w = World::generate(3);
+        // Find a grass block with a lot of air above it (grass is on the west side).
+        let mut spot = None;
+        'search: for x in 6..70i32 {
+            for z in 6..SIZE_Z as i32 - 6 {
+                let top = w.heights[z as usize * SIZE_X + x as usize] as i32 - 1;
+                let open = (1..=12).all(|dy| w.get(x, top + dy, z) == Block::Air);
+                if w.get(x, top, z) == Block::Grass && open {
+                    spot = Some((x, top, z));
+                    break 'search;
+                }
+            }
+        }
+        let (x, y, z) = spot.expect("an open grass block");
+        assert!(w.tree_fits(x, y, z, false) && w.tree_fits(x, y, z, true));
+
+        assert!(w.grow_tree(x, y, z, false));
+        assert_eq!(w.get(x, y + 1, z), Block::Log, "oak trunk on top of the grass");
+        assert!((0..4).all(|dy| w.get(x, y + 1 + dy, z) == Block::Log));
+        // Now the column is taken, so nothing else fits there.
+        assert!(!w.grow_tree(x, y, z, true));
+        assert!(!w.tree_fits(x, y, z, false));
+
+        // A pine somewhere else is made of pine wood.
+        let mut other = World::generate(3);
+        assert!(other.grow_tree(x, y, z, true));
+        assert_eq!(other.get(x, y + 1, z), Block::PineLog);
+        assert!((0..6).all(|dy| other.get(x, y + 1 + dy, z) == Block::PineLog));
+    }
+
+    #[test]
+    fn block_within_measures_distance() {
+        let mut w = World::generate(5);
+        let s = w.spawn_point();
+        let (x, y, z) = (s.x.floor() as i32, s.y.floor() as i32 + 3, s.z.floor() as i32);
+        assert!(w.place_block(x, y, z, Block::Forge));
+        let center = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        assert!(w.block_within(center + Vec3::new(5.0, 0.0, 0.0), 6.0, Block::Forge));
+        assert!(!w.block_within(center + Vec3::new(7.0, 0.0, 0.0), 6.0, Block::Forge));
+        assert!(!w.block_within(center, 6.0, Block::HousePlant));
     }
 }

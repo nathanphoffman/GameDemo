@@ -1,17 +1,21 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 20; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 29; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
                             // 13 bone, 14 skull face, 15 ribs, 16 red, 17 green (health bar),
-                            // 18 deer fur, 19 deer face
+                            // 18 deer fur, 19 deer face, 20 pine bark, 21 pine log top,
+                            // 22 fire, 23 coal, 24 water,
+                            // 25 wood floor, 26 stone floor, 27 forge, 28 house plant
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
 const DIRT: [f32; 3] = [134.0, 96.0, 67.0];
 const STONE: [f32; 3] = [122.0, 124.0, 130.0];
+const PINE_BARK: [f32; 3] = [78.0, 56.0, 42.0];
+const PINE_WOOD: [f32; 3] = [150.0, 110.0, 76.0];
 const BARK: [f32; 3] = [104.0, 82.0, 52.0];
 const WOOD: [f32; 3] = [170.0, 138.0, 86.0];
 const LEAVES: [f32; 3] = [58.0, 128.0, 38.0];
@@ -149,6 +153,102 @@ fn tile(layer: u32) -> Vec<u8> {
                     } else {
                         shaded(BONE, x, y, 52)
                     }
+                }
+                // Pine bark: darker and redder, with the same vertical streaks.
+                20 => {
+                    let f = 0.75 + 0.5 * hash(x, 0, 35);
+                    let g = 0.9 + 0.2 * hash(x, y, 36);
+                    let k = f * g;
+                    [
+                        (PINE_BARK[0] * k).min(255.0) as u8,
+                        (PINE_BARK[1] * k).min(255.0) as u8,
+                        (PINE_BARK[2] * k).min(255.0) as u8,
+                        255,
+                    ]
+                }
+                21 => {
+                    let ring = (x as f32 - 7.5).abs().max((y as f32 - 7.5).abs()) as u32;
+                    let base = if ring % 2 == 0 {
+                        PINE_WOOD
+                    } else {
+                        [PINE_BARK[0] * 1.3, PINE_BARK[1] * 1.3, PINE_BARK[2] * 1.3]
+                    };
+                    shaded(base, x, y, 37)
+                }
+                // Flames: reds and oranges with bright yellow patches.
+                22 => {
+                    let t = hash(x, y, 60) * 0.6 + hash(x / 2, y / 2, 61) * 0.4;
+                    if t > 0.7 {
+                        [255, 225, 90, 255]
+                    } else if t > 0.4 {
+                        [240, 130, 30, 255]
+                    } else {
+                        [190, 50, 20, 255]
+                    }
+                }
+                // Water: blue with lighter ripples.
+                24 => {
+                    let ripple = hash(x, y, 64) * 0.5 + hash(x / 2, y, 65) * 0.5;
+                    let k = 0.8 + 0.4 * ripple;
+                    [(40.0 * k) as u8, (110.0 * k) as u8, (215.0 * k).min(255.0) as u8, 255]
+                }
+                // Wooden floor: horizontal planks with dark seams.
+                25 => {
+                    let plank = y / 4;
+                    let seam = y % 4 == 0 || (x + plank * 5) % 16 == 0;
+                    let tone = 0.85 + 0.3 * hash(plank, 0, 70);
+                    if seam {
+                        [88, 58, 30, 255]
+                    } else {
+                        let g = 0.9 + 0.2 * hash(x, y, 71);
+                        let k = tone * g;
+                        [(176.0 * k).min(255.0) as u8, (128.0 * k) as u8, (76.0 * k) as u8, 255]
+                    }
+                }
+                // Stone floor: pale grey tiles with grout lines.
+                26 => {
+                    let grout = x % 8 == 0 || y % 8 == 0;
+                    if grout {
+                        [88, 90, 96, 255]
+                    } else {
+                        shaded([164.0, 166.0, 172.0], x, y, 72)
+                    }
+                }
+                // Forge: dark stone with a glowing opening.
+                27 => {
+                    let opening = (4..12).contains(&x) && (6..13).contains(&y);
+                    let glow = (6..10).contains(&x) && (8..12).contains(&y);
+                    if glow {
+                        [255, 190, 60, 255]
+                    } else if opening {
+                        [200, 70, 20, 255]
+                    } else {
+                        shaded([86.0, 86.0, 92.0], x, y, 73)
+                    }
+                }
+                // House plant: green leaves in a brown pot, on a light wall.
+                28 => {
+                    let pot = y >= 10 && (4..12).contains(&x);
+                    let stem = (7..9).contains(&x) && (6..10).contains(&y);
+                    let leaves = {
+                        let (dx, dy) = (x as f32 - 7.5, y as f32 - 5.0);
+                        dx * dx + dy * dy * 1.4 < 22.0 && y < 10
+                    };
+                    if pot {
+                        shaded([150.0, 82.0, 52.0], x, y, 74)
+                    } else if stem {
+                        [60, 110, 40, 255]
+                    } else if leaves {
+                        shaded([58.0, 150.0, 60.0], x, y, 75)
+                    } else {
+                        shaded([226.0, 218.0, 196.0], x, y, 76)
+                    }
+                }
+                // Coal: nearly black with a few lighter flecks.
+                23 => {
+                    let fleck = hash(x, y, 62) > 0.88;
+                    let v = if fleck { 70.0 } else { 18.0 + 14.0 * hash(x, y, 63) };
+                    [v as u8, v as u8, (v * 1.05) as u8, 255]
                 }
                 8 => shaded(LEAVES, x, y, 33),
                 9 => shaded(NEEDLES, x, y, 34),

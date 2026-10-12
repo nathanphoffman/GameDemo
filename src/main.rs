@@ -1,4 +1,5 @@
 mod combat;
+mod effects;
 mod enemy;
 mod hud;
 mod music;
@@ -20,11 +21,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-use hud::{HudVertex, MAX_HUD_VERTICES};
+use hud::{HudInfo, HudVertex, MAX_HUD_VERTICES};
 use combat::{Candidate, Combat, Side, MAX_PLAYER_HP};
+use effects::{Effect, Fires};
 use enemy::{Dice, Enemy, Kind, Sight};
 use player::Player;
-use resources::Resources;
+use resources::{Converter, Resources};
 use world::{Vertex, World};
 
 const WALK_SPEED: f32 = 5.0;
@@ -37,6 +39,8 @@ const REACH: f32 = 5.0; // blocks
 const MELEE_RANGE: f32 = 2.3;
 // ...you can attack them from this close (and click a passive one to start a fight).
 const NEAR_RANGE: f32 = 3.0;
+// A forge this close (in blocks) doubles the conversion speed.
+const FORGE_RANGE: f32 = 6.0;
 // After a round ends, the next one can't start for this long.
 const ROUND_PAUSE: f32 = 2.0;
 // How fast the health bar's draining chunk catches up, in hp per second.
@@ -61,6 +65,8 @@ struct Keys {
     jump: bool,
     /// Left mouse button held.
     mining: bool,
+    /// Ctrl held: the mouse is free to click the resource list.
+    ctrl: bool,
 }
 
 fn make_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -584,6 +590,12 @@ struct App {
     keys: Keys,
     last_frame: Instant,
     resources: Resources,
+    converter: Converter,
+    fires: Fires,
+    /// The apply menu, open on this block, or None.
+    menu: Option<(i32, i32, i32)>,
+    /// Last known mouse position in window pixels (only meaningful while Ctrl frees it).
+    cursor_pos: (f32, f32),
     mine_timer: f32,
     enemies: Vec<Enemy>,
     dice: Dice,
@@ -602,6 +614,98 @@ struct App {
 }
 
 impl App {
+    /// True while the mouse is pointing at the HUD (Ctrl held, or the apply menu open).
+    fn ui_open(&self) -> bool {
+        self.keys.ctrl || self.menu.is_some()
+    }
+
+    /// Opens the apply menu on the block under the crosshair, freeing the mouse.
+    fn open_menu(&mut self) {
+        if self.ui_open() {
+            return;
+        }
+        if let Some(target) = self.block_in_sights() {
+            self.menu = Some(target);
+            self.keys.mining = false;
+            self.release_cursor();
+        }
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = None;
+        if self.focused && !self.keys.ctrl {
+            self.grab_cursor();
+        }
+    }
+
+    /// A left click while the menu is open: apply a resource, or close it.
+    fn menu_click(&mut self) {
+        let (width, height) = self
+            .gfx
+            .as_ref()
+            .map_or((0, 0), |g| (g.config.width, g.config.height));
+        let (x, y) = self.cursor_pos;
+        match hud::menu_click_at(width, height, x, y) {
+            None => self.close_menu(),
+            Some(None) => {}
+            Some(Some(kind)) => self.apply_resource(kind),
+        }
+    }
+
+    /// Applies one dense resource of `kind` to the block the menu is open on. If it does
+    /// nothing to that block, nothing is used up and the menu stays open.
+    fn apply_resource(&mut self, kind: usize) {
+        let Some((x, y, z)) = self.menu else {
+            return;
+        };
+        let Some(effect) = self.effect_at(kind, (x, y, z)) else {
+            return;
+        };
+        if !self.resources.spend_dense(kind) {
+            return;
+        }
+        use world::Block;
+        let changed = match effect {
+            Effect::Ignite => {
+                let lit = self.world.replace_block(x, y, z, Block::Burning);
+                if lit {
+                    self.fires.ignite((x, y, z));
+                }
+                lit
+            }
+            Effect::Douse => self.world.replace_block(x, y, z, Block::Water),
+            Effect::Freeze => self.world.replace_block(x, y, z, Block::Snow),
+            Effect::Seed => self.world.replace_block(x, y, z, Block::Grass),
+            Effect::GrowOak => self.world.grow_tree(x, y, z, false),
+            Effect::GrowPine => self.world.grow_tree(x, y, z, true),
+            Effect::LayFloor => self.world.replace_block(x, y, z, Block::WoodFloor),
+            Effect::StoneFloor => self.world.replace_block(x, y, z, Block::StoneFloor),
+            Effect::BuildForge => self.world.place_block(x, y + 1, z, Block::Forge),
+            Effect::PlantHouse => self.world.place_block(x, y + 1, z, Block::HousePlant),
+        };
+        if changed {
+            self.rebuild_mesh();
+        }
+        self.close_menu();
+    }
+
+    /// What applying dense resource `kind` to the block at `pos` would do right now: the
+    /// effect for that type of block, if there is room for it (trees need space).
+    fn effect_at(&self, kind: usize, pos: (i32, i32, i32)) -> Option<Effect> {
+        let (x, y, z) = pos;
+        let effect = effects::effect_for(kind, self.world.get(x, y, z))?;
+        let fits = match effect {
+            Effect::GrowOak => self.world.tree_fits(x, y, z, false),
+            Effect::GrowPine => self.world.tree_fits(x, y, z, true),
+            e if e.builds_on_top() => {
+                self.world.get(x, y + 1, z) == world::Block::Air
+                    && !self.cell_has_creature(x, y + 1, z)
+            }
+            _ => true,
+        };
+        fits.then_some(effect)
+    }
+
     /// Takes the mouse: hidden, and locked (or, where locking isn't available, confined to
     /// the window). Safe to call again; it is repeated on focus and click in case the first
     /// attempt didn't take or the grab was lost.
@@ -776,6 +880,30 @@ impl App {
         }
     }
 
+    /// Whether the player or a creature is (partly) inside the cell at (x, y, z).
+    fn cell_has_creature(&self, x: i32, y: i32, z: i32) -> bool {
+        let cell_min = Vec3::new(x as f32, y as f32, z as f32);
+        let cell_max = cell_min + Vec3::ONE;
+        let overlaps = |min: Vec3, max: Vec3| {
+            min.x < cell_max.x
+                && max.x > cell_min.x
+                && min.y < cell_max.y
+                && max.y > cell_min.y
+                && min.z < cell_max.z
+                && max.z > cell_min.z
+        };
+        let half = Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
+        let body = (
+            self.player.pos - half,
+            self.player.pos + half + Vec3::new(0.0, player::HEIGHT, 0.0),
+        );
+        overlaps(body.0, body.1)
+            || self.enemies.iter().any(|e| {
+                let (min, max) = e.bounds();
+                overlaps(min, max)
+            })
+    }
+
     /// Right click: places a block of the same type as the one the crosshair is on, against
     /// the face it is on, paying what that block would give if mined. It happens instantly.
     fn place_block(&mut self) {
@@ -792,28 +920,7 @@ impl App {
         }
 
         // Don't entomb the player or an enemy.
-        let cell_min = Vec3::new(x as f32, y as f32, z as f32);
-        let cell_max = cell_min + Vec3::ONE;
-        let overlaps = |min: Vec3, max: Vec3| {
-            min.x < cell_max.x
-                && max.x > cell_min.x
-                && min.y < cell_max.y
-                && max.y > cell_min.y
-                && min.z < cell_max.z
-                && max.z > cell_min.z
-        };
-        let half = Vec3::new(player::HALF_WIDTH, 0.0, player::HALF_WIDTH);
-        let body = (
-            self.player.pos - half,
-            self.player.pos + half + Vec3::new(0.0, player::HEIGHT, 0.0),
-        );
-        if overlaps(body.0, body.1) {
-            return;
-        }
-        if self.enemies.iter().any(|e| {
-            let (min, max) = e.bounds();
-            overlaps(min, max)
-        }) {
+        if self.cell_has_creature(x, y, z) {
             return;
         }
 
@@ -845,6 +952,9 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        if self.ui_open() {
+            return; // the mouse is pointing at the HUD, not turning the camera
+        }
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             self.player.yaw += dx as f32 * MOUSE_SENSITIVITY;
             self.player.pitch -= dy as f32 * MOUSE_SENSITIVITY;
@@ -864,11 +974,48 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if focused {
-                    self.grab_cursor();
+                    if self.menu.is_none() {
+                        self.grab_cursor();
+                    }
                 } else {
                     // Let go of everything so nothing stays "held" while we're away.
                     self.keys = Keys::default();
                     self.release_cursor();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x as f32, position.y as f32);
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Middle,
+                state: ElementState::Pressed,
+                ..
+            } => {
+                self.open_menu();
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
+            } if self.menu.is_some() => {
+                self.keys.mining = false;
+                if state == ElementState::Pressed {
+                    self.menu_click();
+                }
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
+            } if self.keys.ctrl => {
+                // Ctrl + click on a resource row picks what the converter works on.
+                self.keys.mining = false;
+                if state == ElementState::Pressed {
+                    let height = self.gfx.as_ref().map_or(0, |g| g.config.height);
+                    let (x, y) = self.cursor_pos;
+                    if let Some(row) = hud::resource_row_at(height, x, y) {
+                        self.converter.toggle(row);
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -891,7 +1038,9 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 ..
             } => {
-                self.place_block();
+                if !self.ui_open() {
+                    self.place_block();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
@@ -903,7 +1052,28 @@ impl ApplicationHandler for App {
                         KeyCode::KeyD => self.keys.d = down,
                         KeyCode::ShiftLeft => self.keys.sprint = down,
                         KeyCode::Space => self.keys.jump = down,
-                        KeyCode::Escape if down => event_loop.exit(),
+                        KeyCode::ControlLeft | KeyCode::ControlRight => {
+                            if down != self.keys.ctrl {
+                                self.keys.ctrl = down;
+                                self.keys.mining = false;
+                                // Free the pointer so it can be moved to the list; take it
+                                // back (and recenter) when Ctrl is let go.
+                                if down {
+                                    self.release_cursor();
+                                } else if self.focused && self.menu.is_none() {
+                                    self.grab_cursor();
+                                }
+                            }
+                        }
+                        KeyCode::KeyE if down => self.open_menu(),
+                        KeyCode::Escape if down => {
+                            // Esc backs out of the menu first, and only then quits.
+                            if self.menu.is_some() {
+                                self.close_menu();
+                            } else {
+                                event_loop.exit();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -959,6 +1129,28 @@ impl ApplicationHandler for App {
 
                 // One crack stage, halfway through the mining time.
                 let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+                // The conversion pipeline and the fires work in the background. Standing
+                // near a forge makes the conversion twice as fast.
+                let forge_boost = self.world.block_within(
+                    self.player.eye(),
+                    FORGE_RANGE,
+                    world::Block::Forge,
+                );
+                let speed = if forge_boost { 2.0 } else { 1.0 };
+                self.converter.update(dt * speed, &mut self.resources);
+                let burnt_out = self.fires.update(dt);
+                let mut changed = false;
+                for (x, y, z) in burnt_out {
+                    // Only if it is still the burning block (it may have been mined).
+                    if self.world.get(x, y, z) == world::Block::Burning {
+                        self.world.replace_block(x, y, z, world::Block::Coal);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.rebuild_mesh();
+                }
+
                 // Whatever the crosshair is on: an enemy, or else a block.
                 let enemy_target = self.enemy_in_sights().map(|s| (s.min, s.max));
                 let target = self.block_in_sights();
@@ -989,7 +1181,7 @@ impl ApplicationHandler for App {
 
                 // Without a real pointer lock, keep the pointer parked in the middle of the
                 // window. Looking around uses raw mouse motion, which this doesn't disturb.
-                if self.focused && !self.cursor_locked {
+                if self.focused && !self.cursor_locked && !self.ui_open() {
                     if let Some(gfx) = &self.gfx {
                         let size = gfx.window.inner_size();
                         let _ = gfx.window.set_cursor_position(PhysicalPosition::new(
@@ -999,6 +1191,15 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // What each dense resource would do to the block the menu is open on.
+                let menu_labels = self.menu.map(|pos| {
+                    let mut labels = [None; 5];
+                    for (kind, label) in labels.iter_mut().enumerate() {
+                        *label = self.effect_at(kind, pos).map(|e| e.label());
+                    }
+                    labels
+                });
+
                 if let Some(gfx) = &mut self.gfx {
                     gfx.set_outline(outline);
                     gfx.set_crack(crack);
@@ -1006,10 +1207,20 @@ impl ApplicationHandler for App {
                     let hud = hud::build(
                         gfx.config.width,
                         gfx.config.height,
-                        self.resources.as_array(),
-                        self.combat.player_roll.map(|r| r.view()),
-                        &enemy_rolls,
-                        (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
+                        &HudInfo {
+                            resources: self.resources.as_array(),
+                            dense: self.resources.dense,
+                            menu: menu_labels,
+                            converting: self
+                                .converter
+                                .selected()
+                                .map(|kind| (kind, self.converter.fraction())),
+                            ctrl_held: self.keys.ctrl,
+                            forge_boost,
+                            player_roll: self.combat.player_roll.map(|r| r.view()),
+                            enemy_rolls: &enemy_rolls,
+                            hp: (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
+                        },
                     );
                     gfx.render(self.player.eye(), self.player.forward(), &hud);
                 }
@@ -1056,6 +1267,10 @@ fn main() {
         keys: Keys::default(),
         last_frame: Instant::now(),
         resources: Resources::default(),
+        converter: Converter::default(),
+        fires: Fires::default(),
+        menu: None,
+        cursor_pos: (0.0, 0.0),
         mine_timer: 0.0,
         enemies,
         dice: Dice::new(),
