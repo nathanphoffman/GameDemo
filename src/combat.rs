@@ -226,11 +226,10 @@ impl Combat {
             if !self.busy() {
                 break;
             }
-            if let Some(roll) = &mut self.player_roll {
-                if !roll.applied {
+            if let Some(roll) = &mut self.player_roll
+                && !roll.applied {
                     roll.age = ROLL_ANIM_SECONDS;
                 }
-            }
             for r in &mut self.enemy_rolls {
                 if !r.applied {
                     r.age = ROLL_ANIM_SECONDS;

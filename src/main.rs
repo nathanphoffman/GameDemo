@@ -80,6 +80,29 @@ struct Keys {
     ctrl: bool,
 }
 
+fn init_buffer<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    label: &str,
+    data: &[T],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(data),
+        usage,
+    })
+}
+
+/// An empty vertex buffer with room for `count` vertices of `T`, refilled with `write_buffer`.
+fn dynamic_vertex_buffer<T>(device: &wgpu::Device, label: &str, count: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (count * std::mem::size_of::<T>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 fn make_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
@@ -357,7 +380,7 @@ impl Gfx {
             &layout,
             "block_vs",
             "block_fs",
-            &[block_layout.clone()],
+            std::slice::from_ref(&block_layout),
             true,
             true,
             None,
@@ -367,69 +390,38 @@ impl Gfx {
         let hud_pipeline =
             make_pipeline(&empty_layout, "hud_vs", "hud_fs", &[hud_layout], false, false, None);
 
-        let mesh_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh vertices"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let mesh_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh indices"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        const VERTEX_COPY: wgpu::BufferUsages =
+            wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_DST);
+        let mesh_vertices = init_buffer(&device, "mesh vertices", vertices, wgpu::BufferUsages::VERTEX);
+        let mesh_indices = init_buffer(&device, "mesh indices", indices, wgpu::BufferUsages::INDEX);
         let (overlay_vertices, overlay_indices) = World::block_overlay(0, 0, 0, 10.0);
-        let crack_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("crack vertices"),
-            contents: bytemuck::cast_slice(&overlay_vertices),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        let crack_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("crack indices"),
-            contents: bytemuck::cast_slice(&overlay_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let crack_vertices = init_buffer(&device, "crack vertices", &overlay_vertices, VERTEX_COPY);
+        let crack_indices =
+            init_buffer(&device, "crack indices", &overlay_indices, wgpu::BufferUsages::INDEX);
         let (outline_v, outline_i) = World::block_outline(0, 0, 0, 12.0);
-        let outline_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("outline vertices"),
-            contents: bytemuck::cast_slice(&outline_v),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        let outline_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("outline indices"),
-            contents: bytemuck::cast_slice(&outline_i),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let outline_vertices = init_buffer(&device, "outline vertices", &outline_v, VERTEX_COPY);
+        let outline_indices =
+            init_buffer(&device, "outline indices", &outline_i, wgpu::BufferUsages::INDEX);
         let enemy_capacity = enemy::MAX_ENEMIES * enemy::MAX_VERTICES_PER_ENEMY;
-        let enemy_buffer_size = (enemy_capacity * std::mem::size_of::<Vertex>()) as u64;
-        let enemy_vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("enemy vertices"),
-            size: enemy_buffer_size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let enemy_index_list = enemy::indices(enemy_capacity);
-        let enemy_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("enemy indices"),
-            contents: bytemuck::cast_slice(&enemy_index_list),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let weather_vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("weather streaks"),
-            size: (weather::MAX_STREAK_VERTICES * std::mem::size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let weather_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("weather indices"),
-            contents: bytemuck::cast_slice(&enemy::indices(weather::MAX_STREAK_VERTICES)),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("hud"),
-            size: (MAX_HUD_VERTICES * std::mem::size_of::<HudVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let enemy_vertices = dynamic_vertex_buffer::<Vertex>(&device, "enemy vertices", enemy_capacity);
+        let enemy_indices = init_buffer(
+            &device,
+            "enemy indices",
+            &enemy::indices(enemy_capacity),
+            wgpu::BufferUsages::INDEX,
+        );
+        let weather_vertices = dynamic_vertex_buffer::<Vertex>(
+            &device,
+            "weather streaks",
+            weather::MAX_STREAK_VERTICES,
+        );
+        let weather_indices = init_buffer(
+            &device,
+            "weather indices",
+            &enemy::indices(weather::MAX_STREAK_VERTICES),
+            wgpu::BufferUsages::INDEX,
+        );
+        let hud_buf = dynamic_vertex_buffer::<HudVertex>(&device, "hud", MAX_HUD_VERTICES);
 
         Gfx {
             window,
@@ -506,20 +498,10 @@ impl Gfx {
 
     /// Replaces the world mesh, e.g. after a block was mined.
     fn update_mesh(&mut self, vertices: &[Vertex], indices: &[u32]) {
-        self.mesh_vertices = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mesh vertices"),
-                contents: bytemuck::cast_slice(vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        self.mesh_indices = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mesh indices"),
-                contents: bytemuck::cast_slice(indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+        self.mesh_vertices =
+            init_buffer(&self.device, "mesh vertices", vertices, wgpu::BufferUsages::VERTEX);
+        self.mesh_indices =
+            init_buffer(&self.device, "mesh indices", indices, wgpu::BufferUsages::INDEX);
         self.mesh_index_count = indices.len() as u32;
     }
 
@@ -927,11 +909,10 @@ impl App {
 
     /// Copies the fight's result onto the creature it hit, and removes the dead.
     fn sync_enemies(&mut self) {
-        if let Some(target) = self.combat.target {
-            if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == target.id) {
+        if let Some(target) = self.combat.target
+            && let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == target.id) {
                 enemy.health = enemy.health.min(target.hp);
             }
-        }
         self.enemies.retain(|e| e.health > 0);
     }
 
@@ -1035,6 +1016,271 @@ impl App {
             self.rebuild_mesh();
         }
     }
+
+    /// Left button pressed or released: picks from the menu, picks the converter's
+    /// resource (with Ctrl), or starts and stops mining and attacking.
+    fn left_click(&mut self, pressed: bool) {
+        if self.menu.is_some() {
+            self.keys.mining = false;
+            if pressed {
+                self.menu_click();
+            }
+        } else if self.keys.ctrl {
+            // Ctrl + click on a resource row picks what the converter works on.
+            self.keys.mining = false;
+            if pressed {
+                let height = self.gfx.as_ref().map_or(0, |g| g.config.height);
+                let (x, y) = self.cursor_pos;
+                if let Some(row) = hud::resource_row_at(height, x, y) {
+                    self.converter.toggle(row);
+                }
+            }
+        } else {
+            self.keys.mining = pressed;
+            if pressed {
+                if self.focused {
+                    // A click is a good moment to retake the mouse if we somehow lost it.
+                    self.grab_cursor();
+                }
+                // Every click is an attack, if the enemy is what the crosshair is on.
+                self.attack();
+            }
+        }
+    }
+
+    /// A key went down or up. Esc backs out of the menu first, and only then quits.
+    fn key_changed(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, down: bool) {
+        match code {
+            KeyCode::KeyW => self.keys.w = down,
+            KeyCode::KeyA => self.keys.a = down,
+            KeyCode::KeyS => self.keys.s = down,
+            KeyCode::KeyD => self.keys.d = down,
+            KeyCode::ShiftLeft => self.keys.sprint = down,
+            KeyCode::Space => self.keys.jump = down,
+            KeyCode::ControlLeft | KeyCode::ControlRight => {
+                if down != self.keys.ctrl {
+                    self.keys.ctrl = down;
+                    self.keys.mining = false;
+                    // Free the pointer so it can be moved to the list; take it
+                    // back (and recenter) when Ctrl is let go.
+                    if down {
+                        self.release_cursor();
+                    } else if self.focused && self.menu.is_none() {
+                        self.grab_cursor();
+                    }
+                }
+            }
+            KeyCode::KeyE if down => self.open_menu(),
+            KeyCode::Escape if down => {
+                // Esc backs out of the menu first, and only then quits.
+                if self.menu.is_some() {
+                    self.close_menu();
+                } else {
+                    event_loop.exit();
+                }
+            }
+            _ => {}
+        }
+
+    }
+
+    /// Runs one frame: moves the player, mining, the fight, weather and background
+    /// conversion, then draws everything.
+    fn redraw(&mut self) {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+
+        let (forward, right) = self.player.flat_axes();
+        let mut dir = Vec3::ZERO;
+        if self.keys.w {
+            dir += forward;
+        }
+        if self.keys.s {
+            dir -= forward;
+        }
+        if self.keys.d {
+            dir += right;
+        }
+        if self.keys.a {
+            dir -= right;
+        }
+        let speed = if self.keys.sprint { SPRINT_SPEED } else { WALK_SPEED };
+        let velocity = dir.normalize_or_zero() * speed;
+        self.player.update(dt, velocity, self.keys.jump, &self.world);
+
+        // Mining: progress builds while the button is held on a block. Looking at the
+        // enemy or away from the ground, or letting go, starts over.
+        if self.keys.mining && self.block_in_sights().is_some() {
+            self.mine_timer += dt;
+            if self.mine_timer >= MINE_INTERVAL {
+                self.mine_timer -= MINE_INTERVAL;
+                self.mine();
+            }
+        } else {
+            self.mine_timer = 0.0;
+        }
+
+        // The fight: dice age and land, damage applies, replies roll.
+        let (attackers, targets) = self.fight_lists();
+        self.combat
+            .update(dt, &mut self.dice, &attackers, &targets);
+        self.sync_enemies();
+        let busy = self.combat.busy();
+        if self.was_busy && !busy {
+            self.round_pause = ROUND_PAUSE;
+        }
+        self.was_busy = busy;
+        self.update_enemies(dt);
+        let hp = self.combat.player_hp as f32;
+        self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(hp);
+
+        // One crack stage, halfway through the mining time.
+        let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+        self.weather.update(dt);
+
+        // The conversion pipeline and the fires work in the background. Standing
+        // near a forge makes the conversion twice as fast.
+        let eye = self.player.eye();
+        let conversion_boost = if self
+            .world
+            .block_within(eye, FURNACE_RANGE, world::Block::Furnace)
+        {
+            4
+        } else if self.world.block_within(eye, FORGE_RANGE, world::Block::Forge) {
+            2
+        } else {
+            1
+        };
+        self.converter
+            .update(dt * conversion_boost as f32, &mut self.resources);
+        let burnt_out = self.fires.update(dt);
+        let mut changed = false;
+        for (x, y, z) in burnt_out {
+            // Only if it is still the burning block (it may have been mined).
+            if self.world.get(x, y, z) == world::Block::Burning {
+                self.world.replace_block(x, y, z, world::Block::Coal);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_mesh();
+        }
+
+        // Whatever the crosshair is on: an enemy, or else a block.
+        let enemy_target = self.enemy_in_sights().map(|s| (s.min, s.max));
+        let target = self.block_in_sights();
+        let crack = target
+            .filter(|_| stage >= 1)
+            .map(|block| (block, stage));
+
+        // One wireframe, around whichever it is.
+        let outline = enemy_target.or_else(|| {
+            target.map(|(x, y, z)| {
+                let min = Vec3::new(x as f32, y as f32, z as f32);
+                (min, min + Vec3::ONE)
+            })
+        });
+
+        let look_at = self.player.pos;
+        let enemy_rolls: Vec<(u32, u32, f32)> = self
+            .combat
+            .enemy_rolls
+            .iter()
+            .map(|r| r.view())
+            .collect();
+        let enemy_mesh: Vec<Vertex> = self
+            .enemies
+            .iter()
+            .flat_map(|e| e.mesh(e.facing(look_at)))
+            .collect();
+
+        // Without a real pointer lock, keep the pointer parked in the middle of the
+        // window. Looking around uses raw mouse motion, which this doesn't disturb.
+        if self.focused && !self.cursor_locked && !self.ui_open()
+            && let Some(gfx) = &self.gfx {
+                let size = gfx.window.inner_size();
+                let _ = gfx.window.set_cursor_position(PhysicalPosition::new(
+                    size.width / 2,
+                    size.height / 2,
+                ));
+            }
+
+        // With a dense resource selected: what right click would build on the block
+        // the crosshair is on, written over that block.
+        let target_label = match (self.selected_dense, self.block_in_sights()) {
+            (Some(kind), Some(pos)) if !self.ui_open() => {
+                // Only if there is enough of it (a staircase needs one per step).
+                let enough = |effect: &Effect| {
+                    self.resources.dense[kind] >= effect.dense_cost()
+                };
+                self.effect_at(kind, pos).filter(enough).and_then(|effect| {
+                    let (width, height) = self
+                        .gfx
+                        .as_ref()
+                        .map_or((1.0, 1.0), |g| (g.config.width as f32, g.config.height as f32));
+                    let view = Mat4::look_to_rh(
+                        self.player.eye(),
+                        self.player.forward(),
+                        Vec3::Y,
+                    );
+                    let proj = Mat4::perspective_rh(
+                        FOV_Y_DEGREES.to_radians(),
+                        width / height,
+                        0.05,
+                        1000.0,
+                    );
+                    let center =
+                        Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                    hud::project_to_screen(proj * view, center, width, height)
+                        .map(|(x, y)| (effect.label(), x, y))
+                })
+            }
+            _ => None,
+        };
+
+        // What each dense resource would do to the block the menu is open on.
+        let menu_labels = self.menu.map(|pos| {
+            let mut labels = [None; 5];
+            for (kind, label) in labels.iter_mut().enumerate() {
+                *label = self
+                    .effect_at(kind, pos)
+                    .map(|e| (e.label(), e.dense_cost()));
+            }
+            labels
+        });
+
+        if let Some(gfx) = &mut self.gfx {
+            gfx.set_outline(outline);
+            gfx.set_crack(crack);
+            gfx.set_enemies(&enemy_mesh);
+            let hud = hud::build(
+                gfx.config.width,
+                gfx.config.height,
+                &HudInfo {
+                    resources: self.resources.as_array(),
+                    dense: self.resources.dense,
+                    menu: menu_labels,
+                    converting: self
+                        .converter
+                        .selected()
+                        .map(|kind| (kind, self.converter.fraction())),
+                    ctrl_held: self.keys.ctrl,
+                    weather_label: self.weather.kind.label(),
+                    selection: self
+                        .selected_dense
+                        .map(|kind| (kind, self.resources.dense[kind])),
+                    target_label,
+                    conversion_boost,
+                    player_roll: self.combat.player_roll.map(|r| r.view()),
+                    enemy_rolls: &enemy_rolls,
+                    hp: (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
+                },
+            );
+            let time = self.started.elapsed().as_secs_f32();
+            gfx.render(self.player.eye(), self.player.forward(), time, &self.weather, &hud);
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -1103,42 +1349,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 state,
                 ..
-            } if self.menu.is_some() => {
-                self.keys.mining = false;
-                if state == ElementState::Pressed {
-                    self.menu_click();
-                }
-            }
-            WindowEvent::MouseInput {
-                button: MouseButton::Left,
-                state,
-                ..
-            } if self.keys.ctrl => {
-                // Ctrl + click on a resource row picks what the converter works on.
-                self.keys.mining = false;
-                if state == ElementState::Pressed {
-                    let height = self.gfx.as_ref().map_or(0, |g| g.config.height);
-                    let (x, y) = self.cursor_pos;
-                    if let Some(row) = hud::resource_row_at(height, x, y) {
-                        self.converter.toggle(row);
-                    }
-                }
-            }
-            WindowEvent::MouseInput {
-                button: MouseButton::Left,
-                state,
-                ..
-            } => {
-                self.keys.mining = state == ElementState::Pressed;
-                if state == ElementState::Pressed && self.focused {
-                    // A click is a good moment to retake the mouse if we somehow lost it.
-                    self.grab_cursor();
-                }
-                // Every click is an attack, if the enemy is what the crosshair is on.
-                if state == ElementState::Pressed {
-                    self.attack();
-                }
-            }
+            } => self.left_click(state == ElementState::Pressed),
             WindowEvent::MouseInput {
                 button: MouseButton::Right,
                 state: ElementState::Pressed,
@@ -1164,235 +1375,10 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    match code {
-                        KeyCode::KeyW => self.keys.w = down,
-                        KeyCode::KeyA => self.keys.a = down,
-                        KeyCode::KeyS => self.keys.s = down,
-                        KeyCode::KeyD => self.keys.d = down,
-                        KeyCode::ShiftLeft => self.keys.sprint = down,
-                        KeyCode::Space => self.keys.jump = down,
-                        KeyCode::ControlLeft | KeyCode::ControlRight => {
-                            if down != self.keys.ctrl {
-                                self.keys.ctrl = down;
-                                self.keys.mining = false;
-                                // Free the pointer so it can be moved to the list; take it
-                                // back (and recenter) when Ctrl is let go.
-                                if down {
-                                    self.release_cursor();
-                                } else if self.focused && self.menu.is_none() {
-                                    self.grab_cursor();
-                                }
-                            }
-                        }
-                        KeyCode::KeyE if down => self.open_menu(),
-                        KeyCode::Escape if down => {
-                            // Esc backs out of the menu first, and only then quits.
-                            if self.menu.is_some() {
-                                self.close_menu();
-                            } else {
-                                event_loop.exit();
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.key_changed(event_loop, code, down);
                 }
             }
-            WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = (now - self.last_frame).as_secs_f32().min(0.1);
-                self.last_frame = now;
-
-                let (forward, right) = self.player.flat_axes();
-                let mut dir = Vec3::ZERO;
-                if self.keys.w {
-                    dir += forward;
-                }
-                if self.keys.s {
-                    dir -= forward;
-                }
-                if self.keys.d {
-                    dir += right;
-                }
-                if self.keys.a {
-                    dir -= right;
-                }
-                let speed = if self.keys.sprint { SPRINT_SPEED } else { WALK_SPEED };
-                let velocity = dir.normalize_or_zero() * speed;
-                self.player.update(dt, velocity, self.keys.jump, &self.world);
-
-                // Mining: progress builds while the button is held on a block. Looking at the
-                // enemy or away from the ground, or letting go, starts over.
-                if self.keys.mining && self.block_in_sights().is_some() {
-                    self.mine_timer += dt;
-                    if self.mine_timer >= MINE_INTERVAL {
-                        self.mine_timer -= MINE_INTERVAL;
-                        self.mine();
-                    }
-                } else {
-                    self.mine_timer = 0.0;
-                }
-
-                // The fight: dice age and land, damage applies, replies roll.
-                let (attackers, targets) = self.fight_lists();
-                self.combat
-                    .update(dt, &mut self.dice, &attackers, &targets);
-                self.sync_enemies();
-                let busy = self.combat.busy();
-                if self.was_busy && !busy {
-                    self.round_pause = ROUND_PAUSE;
-                }
-                self.was_busy = busy;
-                self.update_enemies(dt);
-                let hp = self.combat.player_hp as f32;
-                self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(hp);
-
-                // One crack stage, halfway through the mining time.
-                let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
-                self.weather.update(dt);
-
-                // The conversion pipeline and the fires work in the background. Standing
-                // near a forge makes the conversion twice as fast.
-                let eye = self.player.eye();
-                let conversion_boost = if self
-                    .world
-                    .block_within(eye, FURNACE_RANGE, world::Block::Furnace)
-                {
-                    4
-                } else if self.world.block_within(eye, FORGE_RANGE, world::Block::Forge) {
-                    2
-                } else {
-                    1
-                };
-                self.converter
-                    .update(dt * conversion_boost as f32, &mut self.resources);
-                let burnt_out = self.fires.update(dt);
-                let mut changed = false;
-                for (x, y, z) in burnt_out {
-                    // Only if it is still the burning block (it may have been mined).
-                    if self.world.get(x, y, z) == world::Block::Burning {
-                        self.world.replace_block(x, y, z, world::Block::Coal);
-                        changed = true;
-                    }
-                }
-                if changed {
-                    self.rebuild_mesh();
-                }
-
-                // Whatever the crosshair is on: an enemy, or else a block.
-                let enemy_target = self.enemy_in_sights().map(|s| (s.min, s.max));
-                let target = self.block_in_sights();
-                let crack = target
-                    .filter(|_| stage >= 1)
-                    .map(|block| (block, stage));
-
-                // One wireframe, around whichever it is.
-                let outline = enemy_target.or_else(|| {
-                    target.map(|(x, y, z)| {
-                        let min = Vec3::new(x as f32, y as f32, z as f32);
-                        (min, min + Vec3::ONE)
-                    })
-                });
-
-                let look_at = self.player.pos;
-                let enemy_rolls: Vec<(u32, u32, f32)> = self
-                    .combat
-                    .enemy_rolls
-                    .iter()
-                    .map(|r| r.view())
-                    .collect();
-                let enemy_mesh: Vec<Vertex> = self
-                    .enemies
-                    .iter()
-                    .flat_map(|e| e.mesh(e.facing(look_at)))
-                    .collect();
-
-                // Without a real pointer lock, keep the pointer parked in the middle of the
-                // window. Looking around uses raw mouse motion, which this doesn't disturb.
-                if self.focused && !self.cursor_locked && !self.ui_open() {
-                    if let Some(gfx) = &self.gfx {
-                        let size = gfx.window.inner_size();
-                        let _ = gfx.window.set_cursor_position(PhysicalPosition::new(
-                            size.width / 2,
-                            size.height / 2,
-                        ));
-                    }
-                }
-
-                // With a dense resource selected: what right click would build on the block
-                // the crosshair is on, written over that block.
-                let target_label = match (self.selected_dense, self.block_in_sights()) {
-                    (Some(kind), Some(pos)) if !self.ui_open() => {
-                        // Only if there is enough of it (a staircase needs one per step).
-                        let enough = |effect: &Effect| {
-                            self.resources.dense[kind] >= effect.dense_cost()
-                        };
-                        self.effect_at(kind, pos).filter(enough).and_then(|effect| {
-                            let (width, height) = self
-                                .gfx
-                                .as_ref()
-                                .map_or((1.0, 1.0), |g| (g.config.width as f32, g.config.height as f32));
-                            let view = Mat4::look_to_rh(
-                                self.player.eye(),
-                                self.player.forward(),
-                                Vec3::Y,
-                            );
-                            let proj = Mat4::perspective_rh(
-                                FOV_Y_DEGREES.to_radians(),
-                                width / height,
-                                0.05,
-                                1000.0,
-                            );
-                            let center =
-                                Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-                            hud::project_to_screen(proj * view, center, width, height)
-                                .map(|(x, y)| (effect.label(), x, y))
-                        })
-                    }
-                    _ => None,
-                };
-
-                // What each dense resource would do to the block the menu is open on.
-                let menu_labels = self.menu.map(|pos| {
-                    let mut labels = [None; 5];
-                    for (kind, label) in labels.iter_mut().enumerate() {
-                        *label = self
-                            .effect_at(kind, pos)
-                            .map(|e| (e.label(), e.dense_cost()));
-                    }
-                    labels
-                });
-
-                if let Some(gfx) = &mut self.gfx {
-                    gfx.set_outline(outline);
-                    gfx.set_crack(crack);
-                    gfx.set_enemies(&enemy_mesh);
-                    let hud = hud::build(
-                        gfx.config.width,
-                        gfx.config.height,
-                        &HudInfo {
-                            resources: self.resources.as_array(),
-                            dense: self.resources.dense,
-                            menu: menu_labels,
-                            converting: self
-                                .converter
-                                .selected()
-                                .map(|kind| (kind, self.converter.fraction())),
-                            ctrl_held: self.keys.ctrl,
-                            weather_label: self.weather.kind.label(),
-                            selection: self
-                                .selected_dense
-                                .map(|kind| (kind, self.resources.dense[kind])),
-                            target_label,
-                            conversion_boost,
-                            player_roll: self.combat.player_roll.map(|r| r.view()),
-                            enemy_rolls: &enemy_rolls,
-                            hp: (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
-                        },
-                    );
-                    let time = self.started.elapsed().as_secs_f32();
-                    gfx.render(self.player.eye(), self.player.forward(), time, &self.weather, &hud);
-                }
-            }
+            WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
     }

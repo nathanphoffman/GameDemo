@@ -206,13 +206,16 @@ fn wrap_into_box(p: Vec3, center: Vec3, size: Vec3) -> Vec3 {
     center + rel - shift
 }
 
+/// A streak's (head, tail) position.
+type Streak = (Vec3, Vec3);
+
 /// All the streaks' (head, tail) positions: rain, then wind.
 pub fn streaks(
     cam: Vec3,
     time: f32,
     rain: f32,
     wind: f32,
-) -> (Vec<(Vec3, Vec3)>, Vec<(Vec3, Vec3)>) {
+) -> (Vec<Streak>, Vec<Streak>) {
     let wind_dir = wind_direction(time);
 
     let rain_count = (MAX_RAIN as f32 * rain.clamp(0.0, 1.0)) as usize;

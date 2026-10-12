@@ -128,7 +128,7 @@ fn tile(layer: u32) -> Vec<u8> {
                 // Cut end: light and dark rings.
                 7 => {
                     let ring = (x as f32 - 7.5).abs().max((y as f32 - 7.5).abs()) as u32;
-                    let base = if ring % 2 == 0 { WOOD } else { [BARK[0] * 1.3, BARK[1] * 1.3, BARK[2] * 1.3] };
+                    let base = if ring.is_multiple_of(2) { WOOD } else { [BARK[0] * 1.3, BARK[1] * 1.3, BARK[2] * 1.3] };
                     shaded(base, x, y, 32)
                 }
                 13 => shaded(BONE, x, y, 50),
@@ -175,7 +175,7 @@ fn tile(layer: u32) -> Vec<u8> {
                 }
                 21 => {
                     let ring = (x as f32 - 7.5).abs().max((y as f32 - 7.5).abs()) as u32;
-                    let base = if ring % 2 == 0 {
+                    let base = if ring.is_multiple_of(2) {
                         PINE_WOOD
                     } else {
                         [PINE_BARK[0] * 1.3, PINE_BARK[1] * 1.3, PINE_BARK[2] * 1.3]
