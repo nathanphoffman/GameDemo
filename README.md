@@ -24,7 +24,12 @@ cargo run --release -- 42
 | Mouse | Look |
 | Space | Jump |
 | Left Shift | Sprint |
+| Scroll wheel | Switch mode: mine / attack / off |
 | Esc | Quit |
+
+## Mining
+
+Every 3 seconds the game auto-clicks. In mine mode, that removes the block under the crosshair (within 5 blocks) and adds 1 to the rock counter in the upper left. Attack and off modes do nothing yet.
 
 ## Layout
 
@@ -32,6 +37,7 @@ cargo run --release -- 42
 | --- | --- |
 | `src/main.rs` | Window, input, rendering |
 | `src/world.rs` | Block data, terrain generation, mesh building, collision queries |
+| `src/hud.rs` | Crosshair, rock counter, and mode label (tiny built-in pixel font) |
 | `src/player.rs` | Movement, gravity, jumping, collision |
 | `src/textures.rs` | Block textures, generated in code |
 | `src/shader.wgsl` | Sky, block, and crosshair shaders |

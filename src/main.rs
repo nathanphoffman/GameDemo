@@ -1,3 +1,4 @@
+mod hud;
 mod music;
 mod player;
 mod textures;
@@ -11,11 +12,12 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
+use hud::{HudVertex, MAX_HUD_VERTICES};
 use player::Player;
 use world::{Vertex, World};
 
@@ -23,6 +25,8 @@ const WALK_SPEED: f32 = 5.0;
 const SPRINT_SPEED: f32 = 8.0;
 const MOUSE_SENSITIVITY: f32 = 0.0022;
 const FOV_Y_DEGREES: f32 = 80.0;
+const MINE_INTERVAL: f32 = 3.0; // seconds between automatic clicks
+const REACH: f32 = 5.0; // blocks
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
@@ -43,35 +47,37 @@ struct Keys {
     jump: bool,
 }
 
-const CROSS_VERTS: u32 = 24;
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Mine,
+    Attack,
+    Off,
+}
 
-fn crosshair_vertices(width: u32, height: u32) -> [[f32; 2]; CROSS_VERTS as usize] {
-    // Sizes in pixels, converted to NDC.
-    let (thick, len, gap) = (2.0, 10.0, 4.0);
-    let px = 2.0 / width as f32;
-    let py = 2.0 / height as f32;
-    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        [
-            [x0 * px, y0 * py],
-            [x1 * px, y0 * py],
-            [x1 * px, y1 * py],
-            [x0 * px, y0 * py],
-            [x1 * px, y1 * py],
-            [x0 * px, y1 * py],
-        ]
-    };
-    let h = thick / 2.0;
-    let parts = [
-        rect(gap, -h, gap + len, h),
-        rect(-gap - len, -h, -gap, h),
-        rect(-h, gap, h, gap + len),
-        rect(-h, -gap - len, h, -gap),
-    ];
-    let mut out = [[0.0; 2]; CROSS_VERTS as usize];
-    for (i, v) in parts.iter().flatten().enumerate() {
-        out[i] = *v;
+impl Mode {
+    const ALL: [Mode; 3] = [Mode::Mine, Mode::Attack, Mode::Off];
+
+    fn step(self, forward: bool) -> Mode {
+        let i = Mode::ALL.iter().position(|m| *m == self).unwrap();
+        let n = Mode::ALL.len();
+        Mode::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }]
     }
-    out
+
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Mine => "MINE",
+            Mode::Attack => "ATTACK",
+            Mode::Off => "OFF",
+        }
+    }
+
+    fn color(self) -> [f32; 3] {
+        match self {
+            Mode::Mine => [0.85, 0.87, 0.92],
+            Mode::Attack => [0.95, 0.35, 0.30],
+            Mode::Off => [0.65, 0.65, 0.65],
+        }
+    }
 }
 
 fn make_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -104,11 +110,11 @@ struct Gfx {
     bind_group: wgpu::BindGroup,
     sky_pipeline: wgpu::RenderPipeline,
     block_pipeline: wgpu::RenderPipeline,
-    cross_pipeline: wgpu::RenderPipeline,
+    hud_pipeline: wgpu::RenderPipeline,
     mesh_vertices: wgpu::Buffer,
     mesh_indices: wgpu::Buffer,
     mesh_index_count: u32,
-    cross_buf: wgpu::Buffer,
+    hud_buf: wgpu::Buffer,
 }
 
 impl Gfx {
@@ -318,18 +324,18 @@ impl Gfx {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &block_attrs,
         };
-        let cross_attrs = wgpu::vertex_attr_array![0 => Float32x2];
-        let cross_layout = wgpu::VertexBufferLayout {
-            array_stride: 8,
+        let hud_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3];
+        let hud_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<HudVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &cross_attrs,
+            attributes: &hud_attrs,
         };
 
         let sky_pipeline = make_pipeline(&layout, "sky_vs", "sky_fs", &[], false);
         let block_pipeline =
             make_pipeline(&layout, "block_vs", "block_fs", &[block_layout], true);
-        let cross_pipeline =
-            make_pipeline(&empty_layout, "cross_vs", "cross_fs", &[cross_layout], false);
+        let hud_pipeline =
+            make_pipeline(&empty_layout, "hud_vs", "hud_fs", &[hud_layout], false);
 
         let mesh_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
@@ -341,10 +347,11 @@ impl Gfx {
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let cross_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("crosshair"),
-            contents: bytemuck::cast_slice(&crosshair_vertices(config.width, config.height)),
+        let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hud"),
+            size: (MAX_HUD_VERTICES * std::mem::size_of::<HudVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         Gfx {
@@ -358,11 +365,11 @@ impl Gfx {
             bind_group,
             sky_pipeline,
             block_pipeline,
-            cross_pipeline,
+            hud_pipeline,
             mesh_vertices,
             mesh_indices,
             mesh_index_count: indices.len() as u32,
-            cross_buf,
+            hud_buf,
         }
     }
 
@@ -374,14 +381,28 @@ impl Gfx {
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = make_depth_view(&self.device, size.width, size.height);
-        self.queue.write_buffer(
-            &self.cross_buf,
-            0,
-            bytemuck::cast_slice(&crosshair_vertices(size.width, size.height)),
-        );
     }
 
-    fn render(&mut self, eye: Vec3, forward: Vec3) {
+    /// Replaces the world mesh, e.g. after a block was mined.
+    fn update_mesh(&mut self, vertices: &[Vertex], indices: &[u32]) {
+        self.mesh_vertices = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh vertices"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.mesh_indices = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh indices"),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.mesh_index_count = indices.len() as u32;
+    }
+
+    fn render(&mut self, eye: Vec3, forward: Vec3, hud: &[HudVertex]) {
         let aspect = self.config.width as f32 / self.config.height as f32;
         let view = Mat4::look_to_rh(eye, forward, Vec3::Y);
         let proj = Mat4::perspective_rh(FOV_Y_DEGREES.to_radians(), aspect, 0.05, 1000.0);
@@ -393,6 +414,9 @@ impl Gfx {
         };
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        let hud = &hud[..hud.len().min(MAX_HUD_VERTICES)];
+        self.queue
+            .write_buffer(&self.hud_buf, 0, bytemuck::cast_slice(hud));
 
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
@@ -440,9 +464,9 @@ impl Gfx {
             pass.set_index_buffer(self.mesh_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
 
-            pass.set_pipeline(&self.cross_pipeline);
-            pass.set_vertex_buffer(0, self.cross_buf.slice(..));
-            pass.draw(0..CROSS_VERTS, 0..1);
+            pass.set_pipeline(&self.hud_pipeline);
+            pass.set_vertex_buffer(0, self.hud_buf.slice(..));
+            pass.draw(0..hud.len() as u32, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
@@ -458,7 +482,28 @@ struct App {
     player: Player,
     keys: Keys,
     last_frame: Instant,
+    mode: Mode,
+    rocks: u32,
+    mine_timer: f32,
     _music: Option<music::Music>,
+}
+
+impl App {
+    fn mine(&mut self) {
+        let Some((x, y, z)) =
+            self.world
+                .raycast(self.player.eye(), self.player.forward(), REACH)
+        else {
+            return;
+        };
+        if self.world.remove_block(x, y, z) {
+            self.rocks += 1;
+            let (vertices, indices) = self.world.build_mesh();
+            if let Some(gfx) = &mut self.gfx {
+                gfx.update_mesh(&vertices, &indices);
+            }
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -501,6 +546,16 @@ impl ApplicationHandler for App {
                     gfx.resize(size);
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                if amount != 0.0 {
+                    self.mode = self.mode.step(amount > 0.0);
+                    self.mine_timer = 0.0;
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
@@ -539,8 +594,24 @@ impl ApplicationHandler for App {
                 let velocity = dir.normalize_or_zero() * speed;
                 self.player.update(dt, velocity, self.keys.jump, &self.world);
 
+                // Auto-click: every few seconds, mine whatever the crosshair is on.
+                if self.mode == Mode::Mine {
+                    self.mine_timer += dt;
+                    if self.mine_timer >= MINE_INTERVAL {
+                        self.mine_timer -= MINE_INTERVAL;
+                        self.mine();
+                    }
+                }
+
                 if let Some(gfx) = &mut self.gfx {
-                    gfx.render(self.player.eye(), self.player.forward());
+                    let hud = hud::build(
+                        gfx.config.width,
+                        gfx.config.height,
+                        self.rocks,
+                        self.mode.label(),
+                        self.mode.color(),
+                    );
+                    gfx.render(self.player.eye(), self.player.forward(), &hud);
                 }
             }
             _ => {}
@@ -578,6 +649,9 @@ fn main() {
         player,
         keys: Keys::default(),
         last_frame: Instant::now(),
+        mode: Mode::Mine,
+        rocks: 0,
+        mine_timer: 0.0,
         _music: music::Music::start(),
     };
     event_loop.run_app(&mut app).unwrap();

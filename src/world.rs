@@ -338,6 +338,62 @@ impl World {
         false
     }
 
+    /// Walks a ray through the grid and returns the first solid block within `max_dist`.
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(i32, i32, i32)> {
+        let dir = dir.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return None;
+        }
+        let mut cell = [
+            origin.x.floor() as i32,
+            origin.y.floor() as i32,
+            origin.z.floor() as i32,
+        ];
+        let o = origin.to_array();
+        let d = dir.to_array();
+        let mut step = [0i32; 3];
+        let mut t_max = [f32::INFINITY; 3];
+        let mut t_delta = [f32::INFINITY; 3];
+        for i in 0..3 {
+            if d[i] > 0.0 {
+                step[i] = 1;
+                t_delta[i] = 1.0 / d[i];
+                t_max[i] = ((cell[i] + 1) as f32 - o[i]) / d[i];
+            } else if d[i] < 0.0 {
+                step[i] = -1;
+                t_delta[i] = -1.0 / d[i];
+                t_max[i] = (o[i] - cell[i] as f32) / -d[i];
+            }
+        }
+        loop {
+            if self.get(cell[0], cell[1], cell[2]) != Block::Air {
+                return Some((cell[0], cell[1], cell[2]));
+            }
+            // Step into whichever neighbouring cell the ray reaches first.
+            let axis = if t_max[0] < t_max[1] && t_max[0] < t_max[2] {
+                0
+            } else if t_max[1] < t_max[2] {
+                1
+            } else {
+                2
+            };
+            if t_max[axis] > max_dist {
+                return None;
+            }
+            cell[axis] += step[axis];
+            t_max[axis] += t_delta[axis];
+        }
+    }
+
+    /// Removes a block. The bottom layer is kept so there's never a hole to the void.
+    pub fn remove_block(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if y <= 0 || self.get(x, y, z) == Block::Air {
+            return false;
+        }
+        self.blocks[Self::index(x as usize, y as usize, z as usize)] = Block::Air;
+        true
+    }
+
     /// Feet position standing on the surface in the middle of the world.
     pub fn spawn_point(&self) -> Vec3 {
         let (x, z) = (SIZE_X / 2, SIZE_Z / 2);
@@ -485,5 +541,22 @@ mod tests {
             let s = w.spawn_point();
             assert_eq!(w.get(s.x as i32, s.y as i32, s.z as i32), Block::Air);
         }
+    }
+
+    #[test]
+    fn raycast_hits_ground_and_mining_removes_it() {
+        let mut w = World::generate(5);
+        let s = w.spawn_point();
+        // Looking straight down from the eye hits the block we're standing on.
+        let hit = w
+            .raycast(s + Vec3::new(0.0, 1.62, 0.0), Vec3::NEG_Y, 5.0)
+            .expect("ground within reach");
+        assert_eq!(hit.1, s.y.floor() as i32 - 1);
+        assert!(w.remove_block(hit.0, hit.1, hit.2));
+        assert_eq!(w.get(hit.0, hit.1, hit.2), Block::Air);
+        // Straight up from the eye there is nothing in reach.
+        assert!(w.raycast(s + Vec3::new(0.0, 1.62, 0.0), Vec3::Y, 5.0).is_none());
+        // The bottom layer can't be mined.
+        assert!(!w.remove_block(10, 0, 10));
     }
 }
