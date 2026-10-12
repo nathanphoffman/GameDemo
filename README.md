@@ -26,9 +26,10 @@ cargo run --release -- 42
 | Left Shift | Sprint |
 | Left click | Attack a passive animal (deer) if you are close and looking at it |
 | Left click (hold) | Mine the block the crosshair is on |
-| Right click | Place a block against the face the crosshair is on |
+| Right click | Place a block against the face the crosshair is on, or apply the selected dense resource to the block (see Building) |
+| Scroll wheel | Choose what right click does: clone, or one of the dense resources |
 | Ctrl (hold) + left click | On a resource in the list: pick what the converter works on |
-| Middle click or E | Open the apply menu on the block the crosshair is on |
+| Middle click or E | Open the apply menu on the block the crosshair is on (apply one resource to one block) |
 | Esc | Close the apply menu, or quit |
 
 ## Mining
@@ -87,7 +88,12 @@ Mining a block that is still burning, a water block, or any of the crafted block
 
 ## Building
 
-Right click places a block instantly, against the face of the block the crosshair is on (within 5 blocks). It is the same type as that block, and it costs what mining that type gives you: dirt or stone cost 1 grey, grass 1 grey + 1 green, snow 1 grey + 1 white, an oak trunk 1 brown, a pine trunk 2 brown, an oak leaf 2 green, a pine needle 1 green. Right clicking against a wooden floor places another wooden floor cube, which costs 1 dense brown instead of raw resources. Nothing is placed if you can't afford it, if the spot is inside you or a creature, or if you are looking at a creature.
+Scroll the wheel to choose what right click does. The choice shows in the lower right corner and stays until you change it.
+
+- **Clone (the default):** right click places a block of the same type as the one you're aiming at, as described below.
+- **A dense resource:** right click applies that resource straight to the block you're aiming at, using the rules in the table under Applying resources, so you can lay a whole floor by right clicking block after block. The name of what it will build (FLOOR, FURNACE, TREE...) is written over the highlighted block. Nothing is shown if it would do nothing there or you have none left.
+
+In clone mode, right click places a block instantly, against the face of the block the crosshair is on (within 5 blocks). It is the same type as that block, and it costs what mining that type gives you: dirt or stone cost 1 grey, grass 1 grey + 1 green, snow 1 grey + 1 white, an oak trunk 1 brown, a pine trunk 2 brown, an oak leaf 2 green, a pine needle 1 green. Right clicking against a wooden floor places another wooden floor cube, which costs 1 dense brown instead of raw resources. Nothing is placed if you can't afford it, if the spot is inside you or a creature, or if you are looking at a creature.
 
 ## Fighting
 

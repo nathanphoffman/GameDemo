@@ -66,6 +66,20 @@ impl Effect {
     }
 }
 
+/// Steps the right-click selection through "clone" (`None`), then each dense resource
+/// (0 = grey ... 4 = black), and back around.
+pub fn cycle_selection(current: Option<usize>, forward: bool) -> Option<usize> {
+    const KINDS: usize = 5;
+    // Position in the ring: 0 is clone, 1..=5 are the dense resources.
+    let at = current.map_or(0, |kind| kind + 1);
+    let next = if forward {
+        (at + 1) % (KINDS + 1)
+    } else {
+        (at + KINDS) % (KINDS + 1)
+    };
+    next.checked_sub(1)
+}
+
 /// Blocks that are green or brown: grass, leaves and wood.
 pub fn burnable(block: Block) -> bool {
     matches!(
@@ -192,6 +206,24 @@ mod tests {
         // A forge goes on wood, a furnace on stone: the next level up.
         assert_eq!(effect_for(CARBON, Block::WoodFloor), Some(Effect::BuildForge));
         assert_eq!(effect_for(CARBON, Block::StoneFloor), Some(Effect::BuildFurnace));
+    }
+
+    #[test]
+    fn the_scroll_selection_goes_round_through_clone_and_the_five_dense_kinds() {
+        let mut selection = None; // clone
+        let mut seen = vec![selection];
+        for _ in 0..6 {
+            selection = cycle_selection(selection, true);
+            seen.push(selection);
+        }
+        assert_eq!(
+            seen,
+            vec![None, Some(0), Some(1), Some(2), Some(3), Some(4), None]
+        );
+        // Backwards from clone wraps to the last one.
+        assert_eq!(cycle_selection(None, false), Some(4));
+        assert_eq!(cycle_selection(Some(0), false), None);
+        assert_eq!(cycle_selection(Some(3), false), Some(2));
     }
 
     #[test]

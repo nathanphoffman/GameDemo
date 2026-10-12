@@ -268,6 +268,12 @@ pub struct HudInfo<'a> {
     pub ctrl_held: bool,
     /// Name of the current weather, shown in the upper right corner.
     pub weather_label: &'static str,
+    /// What right click does: `None` clones the block it is aimed at, `Some(kind)` applies
+    /// that dense resource (0 = grey ... 4 = black) and how many of it you have.
+    pub selection: Option<(usize, u32)>,
+    /// What the selected resource would build on the block being aimed at, and where that
+    /// block is on the screen in pixels.
+    pub target_label: Option<(&'static str, f32, f32)>,
     /// How many times faster than normal conversion is running (1, 2 with a forge nearby, 4
     /// with a furnace).
     pub conversion_boost: u32,
@@ -277,6 +283,22 @@ pub struct HudInfo<'a> {
     /// (health shown on the bar, actual health, max health). The shown value trails the actual
     /// one after a hit, which paints the draining chunk.
     pub hp: (f32, i32, i32),
+}
+
+/// Where a point in the world lands on the screen, in pixels from the top left, or None if
+/// it is behind the camera.
+pub fn project_to_screen(
+    view_proj: glam::Mat4,
+    point: glam::Vec3,
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32)> {
+    let clip = view_proj * point.extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = (clip.x / clip.w, clip.y / clip.w);
+    Some(((ndc.0 * 0.5 + 0.5) * width, (0.5 - ndc.1 * 0.5) * height))
 }
 
 /// Size of one font pixel, in screen pixels.
@@ -341,6 +363,8 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         converting,
         ctrl_held,
         weather_label,
+        selection,
+        target_label,
         conversion_boost,
         player_roll,
         enemy_rolls,
@@ -435,6 +459,54 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
     {
         let text_width = weather_label.chars().count() as f32 * 4.0 * scale - scale;
         b.text(w - margin - text_width, margin, scale, weather_label, [0.85, 0.9, 1.0]);
+    }
+
+    // Lower right: what right click will do.
+    {
+        let y = h - margin - 7.0 * scale;
+        match selection {
+            None => {
+                let label = "CLONE";
+                let text_width = label.len() as f32 * 4.0 * scale - scale;
+                b.text(w - margin - text_width, y, scale, label, [0.85, 0.85, 0.9]);
+            }
+            Some((kind, count)) => {
+                let text = count.to_string();
+                let text_width = text.len() as f32 * 4.0 * scale - scale;
+                let color = RESOURCE_COLORS[kind.min(KINDS - 1)];
+                let frame = if kind == KINDS - 1 {
+                    [0.70, 0.70, 0.75]
+                } else {
+                    [0.10, 0.10, 0.12]
+                };
+                let right = w - margin;
+                b.text(right - text_width, y, scale, &text, white);
+                let tx = right - text_width - 9.0 * scale;
+                let o = 0.9 * scale;
+                b.triangle(
+                    [
+                        (tx + 3.0 * scale, y - o),
+                        (tx - o * 1.6, y + 6.0 * scale + o * 0.6),
+                        (tx + 6.0 * scale + o * 1.6, y + 6.0 * scale + o * 0.6),
+                    ],
+                    frame,
+                );
+                b.triangle(
+                    [
+                        (tx + 3.0 * scale, y + 0.2 * scale),
+                        (tx, y + 6.0 * scale),
+                        (tx + 6.0 * scale, y + 6.0 * scale),
+                    ],
+                    color,
+                );
+            }
+        }
+    }
+
+    // Over the aimed-at block: what the selected resource would build there.
+    if let Some((label, px, py)) = target_label {
+        let text_scale = scale * 1.5;
+        b.centered_text(px, py - 3.5 * text_scale, text_scale, label, [1.0, 0.85, 0.3]);
     }
 
     // The apply menu, in the middle of the screen.
@@ -534,6 +606,8 @@ mod tests {
                     converting: Some((2, 0.5)),
                     ctrl_held: true,
                     weather_label: "HEAVY RAIN",
+                    selection: Some((4, 99999)),
+                    target_label: Some(("FURNACE", 960.0, 540.0)),
                     conversion_boost: 4,
                     player_roll: Some(roll),
                     enemy_rolls: &four,
@@ -553,13 +627,15 @@ mod tests {
                 converting: None,
                 ctrl_held: false,
                 weather_label: "SUNNY",
+                selection: None,
+                target_label: None,
                 conversion_boost: 1,
                 player_roll: None,
                 enemy_rolls: &[],
                 hp: (50.0, 50, 50),
             },
         );
-        assert!(quiet.len() < 3000, "{}", quiet.len());
+        assert!(quiet.len() < 6000, "{}", quiet.len());
     }
 
     #[test]
@@ -587,5 +663,19 @@ mod tests {
         assert_eq!(menu_click_at(w, h, mid_x, y0 + 3.0 * scale), Some(None), "the title");
         assert_eq!(menu_click_at(w, h, 10.0, 10.0), None, "outside");
         assert_eq!(menu_click_at(w, h, w as f32 - 10.0, h as f32 / 2.0), None, "outside");
+    }
+
+    #[test]
+    fn points_ahead_land_in_the_middle_and_points_behind_are_dropped() {
+        use glam::{Mat4, Vec3};
+        let view = Mat4::look_to_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let proj = Mat4::perspective_rh(80f32.to_radians(), 16.0 / 9.0, 0.05, 1000.0);
+        let vp = proj * view;
+        let (x, y) = project_to_screen(vp, Vec3::new(0.0, 0.0, -5.0), 1920.0, 1080.0).unwrap();
+        assert!((x - 960.0).abs() < 0.5 && (y - 540.0).abs() < 0.5, "{x},{y}");
+        // To the right and up goes right and up on the screen.
+        let (rx, ry) = project_to_screen(vp, Vec3::new(1.0, 1.0, -5.0), 1920.0, 1080.0).unwrap();
+        assert!(rx > 960.0 && ry < 540.0);
+        assert!(project_to_screen(vp, Vec3::new(0.0, 0.0, 5.0), 1920.0, 1080.0).is_none());
     }
 }

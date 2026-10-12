@@ -17,7 +17,9 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -655,6 +657,9 @@ struct App {
     fires: Fires,
     /// The apply menu, open on this block, or None.
     menu: Option<(i32, i32, i32)>,
+    /// What right click does: `None` clones the block it is aimed at (normal block placing),
+    /// `Some(kind)` applies that dense resource to it. Changed with the scroll wheel.
+    selected_dense: Option<usize>,
     /// Last known mouse position in window pixels (only meaningful while Ctrl frees it).
     cursor_pos: (f32, f32),
     mine_timer: f32,
@@ -716,14 +721,30 @@ impl App {
     /// Applies one dense resource of `kind` to the block the menu is open on. If it does
     /// nothing to that block, nothing is used up and the menu stays open.
     fn apply_resource(&mut self, kind: usize) {
-        let Some((x, y, z)) = self.menu else {
+        let Some(pos) = self.menu else {
             return;
         };
+        if self.apply_dense(kind, pos) {
+            self.close_menu();
+        }
+    }
+
+    /// Right click with a dense resource selected: applies it to the block under the
+    /// crosshair, just like picking it from the menu.
+    fn apply_selected(&mut self, kind: usize) {
+        if let Some(pos) = self.block_in_sights() {
+            self.apply_dense(kind, pos);
+        }
+    }
+
+    /// Applies one dense resource of `kind` to the block at `pos`, if it does anything there.
+    /// Returns whether it did (and so whether a resource was used up).
+    fn apply_dense(&mut self, kind: usize, (x, y, z): (i32, i32, i32)) -> bool {
         let Some(effect) = self.effect_at(kind, (x, y, z)) else {
-            return;
+            return false;
         };
         if !self.resources.spend_dense(kind) {
-            return;
+            return false;
         }
         use world::Block;
         let changed = match effect {
@@ -756,7 +777,7 @@ impl App {
         if changed {
             self.rebuild_mesh();
         }
-        self.close_menu();
+        true
     }
 
     /// What applying dense resource `kind` to the block at `pos` would do right now: the
@@ -1125,7 +1146,20 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !self.ui_open() {
-                    self.place_block();
+                    match self.selected_dense {
+                        None => self.place_block(),
+                        Some(kind) => self.apply_selected(kind),
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                if amount != 0.0 && !self.ui_open() {
+                    self.selected_dense =
+                        effects::cycle_selection(self.selected_dense, amount > 0.0);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1285,6 +1319,35 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // With a dense resource selected: what right click would build on the block
+                // the crosshair is on, written over that block.
+                let target_label = match (self.selected_dense, self.block_in_sights()) {
+                    (Some(kind), Some(pos)) if !self.ui_open() && self.resources.dense[kind] > 0 => {
+                        self.effect_at(kind, pos).and_then(|effect| {
+                            let (width, height) = self
+                                .gfx
+                                .as_ref()
+                                .map_or((1.0, 1.0), |g| (g.config.width as f32, g.config.height as f32));
+                            let view = Mat4::look_to_rh(
+                                self.player.eye(),
+                                self.player.forward(),
+                                Vec3::Y,
+                            );
+                            let proj = Mat4::perspective_rh(
+                                FOV_Y_DEGREES.to_radians(),
+                                width / height,
+                                0.05,
+                                1000.0,
+                            );
+                            let center =
+                                Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                            hud::project_to_screen(proj * view, center, width, height)
+                                .map(|(x, y)| (effect.label(), x, y))
+                        })
+                    }
+                    _ => None,
+                };
+
                 // What each dense resource would do to the block the menu is open on.
                 let menu_labels = self.menu.map(|pos| {
                     let mut labels = [None; 5];
@@ -1311,6 +1374,10 @@ impl ApplicationHandler for App {
                                 .map(|kind| (kind, self.converter.fraction())),
                             ctrl_held: self.keys.ctrl,
                             weather_label: self.weather.kind.label(),
+                            selection: self
+                                .selected_dense
+                                .map(|kind| (kind, self.resources.dense[kind])),
+                            target_label,
                             conversion_boost,
                             player_roll: self.combat.player_roll.map(|r| r.view()),
                             enemy_rolls: &enemy_rolls,
@@ -1370,6 +1437,7 @@ fn main() {
         converter: Converter::default(),
         fires: Fires::default(),
         menu: None,
+        selected_dense: None,
         cursor_pos: (0.0, 0.0),
         mine_timer: 0.0,
         enemies,
