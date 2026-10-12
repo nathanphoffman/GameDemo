@@ -78,6 +78,9 @@ pub(crate) struct App {
     /// Keys held, and which way we are looking (kept in step with `body`).
     input: PlayerInput,
     keys: Keys,
+    /// The number the host last gave us for where we are: it changes when the host moves us
+    /// (we died), and our positions are sent with it so the host knows they are up to date.
+    epoch: u32,
     /// What the host was last told about our position, and when.
     sent_pose: (Vec3, f32, f32),
     sent_pose_at: Instant,
@@ -123,6 +126,7 @@ impl App {
             .iter()
             .find(|p| p.id == me)
             .map_or(Vec3::ZERO, |p| p.pos);
+        let epoch = snapshot.you.epoch;
         let seed = 0x5EA7;
         let now = Instant::now();
         let mut app = App {
@@ -133,6 +137,7 @@ impl App {
             body: Player::new(start),
             input: PlayerInput::default(),
             keys: Keys::default(),
+            epoch,
             sent_pose: (start, 0.0, 0.0),
             sent_pose_at: now,
             scene: Scene::default(),
@@ -196,6 +201,16 @@ impl App {
     /// One update of the game from the host: the sounds and effects of what happened.
     fn take_in(&mut self, tick: &game_net::Tick) {
         self.update_at = Instant::now();
+        // The host moved us (we died): go where it says, and send positions with its number.
+        if tick.snapshot.you.epoch != self.epoch {
+            self.epoch = tick.snapshot.you.epoch;
+            if let Some(me) = tick.snapshot.players.iter().find(|p| p.id == self.me) {
+                self.body.pos = me.pos;
+                self.body.vel_y = 0.0;
+                self.sent_pose = (me.pos, self.body.yaw, self.body.pitch);
+            }
+            self.hp_shown = tick.snapshot.you.hp as f32;
+        }
         for event in &tick.events {
             match *event {
                 Event::Dug { player, block, ice, pos } => {
@@ -214,6 +229,15 @@ impl App {
                     {
                         music.dig_at(block, ice, volume);
                     }
+                }
+                Event::Died { player } => {
+                    let who = if player == self.me {
+                        "YOU".to_string()
+                    } else {
+                        self.mirror.name_of(player).unwrap_or("SOMEONE").to_string()
+                    };
+                    let line = format!("* {} DIED", hud::display_text(&who));
+                    self.chat_log.push((Instant::now(), line));
                 }
                 Event::RoundSkipped { player } if player == self.me => {
                     // The health bar jumps to its final value instead of draining.
@@ -269,7 +293,7 @@ impl App {
         if !now && self.sent_pose_at.elapsed().as_secs_f32() < POSE_INTERVAL {
             return;
         }
-        self.send(Command::SetPose { pos: pose.0, yaw: pose.1, pitch: pose.2 });
+        self.send(Command::SetPose { pos: pose.0, yaw: pose.1, pitch: pose.2, epoch: self.epoch });
         self.sent_pose = pose;
         self.sent_pose_at = Instant::now();
     }

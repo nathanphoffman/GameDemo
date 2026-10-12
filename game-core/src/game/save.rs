@@ -12,7 +12,7 @@ use crate::resources::Converter;
 use crate::world::BlockChange;
 
 /// Bumped when what is saved changes in a way old files can't be read.
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 /// One player's things.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +23,8 @@ pub struct SavedPlayer {
     pub hp: i32,
     pub resources: Resources,
     pub converter: Converter,
+    /// Seconds of resurrection sickness left.
+    pub sickness: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +48,7 @@ impl Game {
             hp: p.combat.player_hp,
             resources: p.resources,
             converter: p.converter.clone(),
+            sickness: p.sickness,
         };
         let mut players: Vec<SavedPlayer> = self.players.iter().map(kept).collect();
         for gone in &self.away {
@@ -86,6 +89,7 @@ impl Game {
                 state.resources = saved.resources;
                 state.converter = saved.converter;
                 state.combat.player_hp = saved.hp;
+                state.sickness = saved.sickness;
                 state
             })
             .collect();

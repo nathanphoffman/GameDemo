@@ -117,6 +117,14 @@ impl Builder {
         }
     }
 
+    /// A bar: a backing, with `fraction` (0 to 1) of its width filled from the left. Used for
+    /// how far the converter is through its wait, and for how much sickness is left.
+    fn progress_bar(&mut self, rect: (f32, f32, f32, f32), fraction: f32, backing: [f32; 3], fill: [f32; 3]) {
+        let (x, y, w, h) = rect;
+        self.rect(x, y, w, h, backing);
+        self.rect(x, y, w * fraction.clamp(0.0, 1.0), h, fill);
+    }
+
     /// Filled triangle with its corners given in pixels.
     fn triangle(&mut self, corners: [(f32, f32); 3], color: [f32; 3]) {
         for (x, y) in corners {
@@ -308,6 +316,8 @@ pub struct HudInfo<'a> {
     /// (health shown on the bar, actual health, max health). The shown value trails the actual
     /// one after a hit, which paints the draining chunk.
     pub hp: (f32, i32, i32),
+    /// Resurrection sickness: seconds left and how long it lasts in all.
+    pub sickness: Option<(f32, f32)>,
     /// Recent chat lines, oldest first, already in `display_text` form.
     pub chat: &'a [String],
     /// The line being typed, if the chat is open.
@@ -402,6 +412,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         player_roll,
         enemy_rolls,
         hp,
+        sickness,
         chat,
         chat_input,
         player_list,
@@ -445,9 +456,10 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
             } else {
                 [0.16, 0.16, 0.19]
             };
-            b.rect(x0, y0, w0, h0, backing);
-            if let Some((_, fraction)) = selected {
-                b.rect(x0, y0, w0 * fraction.clamp(0.0, 1.0), h0, [0.50, 0.38, 0.08]);
+            // Amber, filling up over the wait.
+            let fraction = selected.map_or(0.0, |(_, fraction)| fraction);
+            b.progress_bar((x0, y0, w0, h0), fraction, backing, [0.50, 0.38, 0.08]);
+            if selected.is_some() {
                 if conversion_boost > 1 {
                     let label = format!("X{conversion_boost}");
                     b.text(x0 + (ROW_WIDTH + 2.0) * scale, y + 0.5 * scale, scale, &label, [1.0, 0.65, 0.2]);
@@ -624,6 +636,23 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         draw_roll(&mut b, x, rest_y, scale, *roll, &ENEMY_DICE, false);
     }
 
+    // Under the resource rows: resurrection sickness, as a purple bar that drains.
+    if let Some((left, total)) = sickness {
+        let y = margin + KINDS as f32 * 8.0 * scale + 3.0 * scale;
+        b.text(margin, y, scale, "RESURRECTION SICKNESS", [0.85, 0.6, 1.0]);
+        let bar = (margin - scale, y + 7.0 * scale, 86.0 * scale, 7.0 * scale);
+        b.progress_bar(bar, left / total.max(1.0), [0.14, 0.06, 0.20], [0.50, 0.22, 0.62]);
+        let seconds = left.ceil().max(0.0) as u32;
+        let time = format!("{}:{:02}", seconds / 60, seconds % 60);
+        b.centered_text(bar.0 + bar.2 / 2.0, bar.1 + 1.0 * scale, scale, &time, white);
+        // What it means, in a few short lines.
+        let what = ["MINING AND CONVERTING", "TAKE TWICE AS LONG.", "YOU ATTACK EVERY OTHER ROUND."];
+        for (i, line) in what.iter().enumerate() {
+            let y = bar.1 + bar.3 + (2.0 + i as f32 * 6.5) * scale;
+            b.text(margin, y, scale, line, [0.78, 0.70, 0.88]);
+        }
+    }
+
     // Names over other players' heads.
     for (name, x, y) in name_tags {
         b.centered_text(*x, *y, scale, name, [1.0, 1.0, 0.8]);
@@ -692,6 +721,7 @@ mod tests {
                     player_roll: Some(roll),
                     enemy_rolls: &four,
                     hp: (50.0, 50, 50),
+                    sickness: Some((59.0, 60.0)),
                     chat: &chat,
                     chat_input: Some("HELLO THERE FRIENDS"),
                     player_list: Some(&names),
@@ -717,6 +747,7 @@ mod tests {
                 player_roll: None,
                 enemy_rolls: &[],
                 hp: (50.0, 50, 50),
+                sickness: None,
                 chat: &[],
                 chat_input: None,
                 player_list: None,

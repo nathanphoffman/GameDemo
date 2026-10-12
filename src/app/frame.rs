@@ -117,6 +117,8 @@ impl App {
                     player_roll: you.player_roll,
                     enemy_rolls: &you.enemy_rolls,
                     hp: (self.hp_shown, you.hp, MAX_PLAYER_HP),
+                    sickness: (you.sickness > 0.0)
+                        .then_some((you.sickness, game::SICKNESS_SECONDS)),
                     chat: &chat,
                     chat_input: self.chat_input.as_deref().map(hud::display_text).as_deref(),
                     player_list: self.show_players.then_some(&player_list[..]),

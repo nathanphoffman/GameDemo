@@ -43,6 +43,10 @@ pub const FURNACE_RANGE: f32 = 10.0;
 pub const ROUND_PAUSE: f32 = 2.0;
 /// Fastest a player can really move, in blocks per second (falling is the fastest).
 const MAX_POSE_SPEED: f32 = 80.0;
+/// How long resurrection sickness lasts, in seconds.
+pub const SICKNESS_SECONDS: f32 = 60.0;
+/// How many times slower mining, conversion and attacking are while sick.
+const SICKNESS_SLOWDOWN: f32 = 2.0;
 /// How many kinds of dense resource there are.
 const DENSE_KINDS: usize = 5;
 
@@ -104,6 +108,11 @@ pub struct PlayerState {
     pose_from_client: bool,
     /// Seconds since a pose was last accepted.
     since_pose: f32,
+    /// Goes up each time the host moves the player (they died): a pose that was made before
+    /// the player knew about it carries the old number and is ignored.
+    pub epoch: u32,
+    /// Seconds of resurrection sickness left, or 0.
+    pub sickness: f32,
     /// How much faster conversion is right now (a forge or furnace is close).
     pub conversion_boost: u32,
     was_busy: bool,
@@ -125,6 +134,8 @@ impl PlayerState {
             round_pause: 0.0,
             pose_from_client: false,
             since_pose: 0.0,
+            epoch: 0,
+            sickness: 0.0,
             conversion_boost: 1,
             was_busy: false,
         }
@@ -139,7 +150,9 @@ pub enum Command {
     /// Where the player's own computer says they are, and where they look. This is how a
     /// player moves in a network game: they walk on their own copy of the world, so it feels
     /// instant, and the host takes their word for it, as long as it is not an impossible jump.
-    SetPose { pos: Vec3, yaw: f32, pitch: f32 },
+    /// `epoch` is the number the host last told them (see `YouView::epoch`); a pose with an old
+    /// number was made before they were moved by the host, and is ignored.
+    SetPose { pos: Vec3, yaw: f32, pitch: f32, epoch: u32 },
     /// A click: starts a fight with the passive creature under the crosshair, or skips ahead
     /// in the current round.
     Attack,
@@ -160,6 +173,8 @@ pub enum Event {
     Dug { player: PlayerId, block: Block, ice: bool, pos: (i32, i32, i32) },
     /// A click ended the round in flight early, so health bars should jump to their end value.
     RoundSkipped { player: PlayerId },
+    /// A player's health ran out: they are back at the start, with resurrection sickness.
+    Died { player: PlayerId },
 }
 
 pub struct Game {
@@ -238,6 +253,7 @@ impl Game {
                 state.round_pause = 0.0;
                 state.pose_from_client = false;
                 state.since_pose = 0.0;
+                state.epoch = 0;
                 state.was_busy = false;
                 (state, true)
             }
@@ -306,7 +322,7 @@ impl Game {
                 player.body.yaw = input.yaw;
                 player.body.pitch = input.pitch;
             }
-            Command::SetPose { pos, yaw, pitch } => {
+            Command::SetPose { pos, yaw, pitch, epoch } => {
                 let in_world = pos.x >= 0.0
                     && pos.z >= 0.0
                     && pos.x < world::SIZE_X as f32
@@ -317,6 +333,9 @@ impl Game {
                     return;
                 }
                 let player = &mut self.players[p];
+                if epoch != player.epoch {
+                    return;
+                }
                 // Faster than anyone can fall or run is not walking.
                 let allowed = MAX_POSE_SPEED * (player.since_pose + 0.1) + 1.0;
                 if (pos - player.body.pos).length() > allowed {
@@ -466,7 +485,7 @@ mod tests {
         run(&mut game, 1.0);
         let start = game.player(me).unwrap().body.pos;
         let target = start + Vec3::new(3.0, 0.0, 0.0);
-        game.apply(me, Command::SetPose { pos: target, yaw: 0.5, pitch: 0.2 });
+        game.apply(me, Command::SetPose { pos: target, yaw: 0.5, pitch: 0.2, epoch: 0 });
         // The keys say forward, but the player's own computer is in charge.
         let input = PlayerInput { forward: true, yaw: 0.5, ..PlayerInput::default() };
         game.apply(me, Command::SetInput(input));
@@ -488,10 +507,10 @@ mod tests {
             Vec3::new(-10.0, 5.0, 5.0),
             Vec3::new(5.0, 5000.0, 5.0),
         ] {
-            game.apply(me, Command::SetPose { pos, yaw: 0.0, pitch: 0.0 });
+            game.apply(me, Command::SetPose { pos, yaw: 0.0, pitch: 0.0, epoch: 0 });
             assert_eq!(game.player(me).unwrap().body.pos, start, "{pos:?}");
         }
-        game.apply(me, Command::SetPose { pos: start, yaw: f32::NAN, pitch: 0.0 });
+        game.apply(me, Command::SetPose { pos: start, yaw: f32::NAN, pitch: 0.0, epoch: 0 });
         assert_eq!(game.player(me).unwrap().body.yaw, 0.0);
         // A wild kind of resource doesn't crash anything.
         game.apply(me, Command::ApplyToTarget { kind: 99 });
@@ -533,5 +552,57 @@ mod tests {
         game.remove_player(again);
         game.remove_player(again);
         assert_eq!(game.away.iter().filter(|p| p.name == "Ann" || p.name == "ANN").count(), 1);
+    }
+
+    #[test]
+    fn dying_puts_you_back_at_the_start_with_sickness_and_your_things() {
+        let mut game = Game::new(3);
+        let me = game.add_player();
+        run(&mut game, 1.0);
+        let start = game.world.spawn_point();
+        let things = game.player(me).unwrap().resources;
+        {
+            let p = game.player_mut_for_test(me);
+            p.body.pos = start + Vec3::new(40.0, 0.0, 0.0);
+            p.combat.player_hp = 0;
+        }
+        game.update(1.0 / 30.0);
+        let p = game.player(me).unwrap();
+        assert!((p.body.pos - start).length() < 0.5, "{:?}", p.body.pos);
+        assert_eq!(p.combat.player_hp, crate::combat::MAX_PLAYER_HP);
+        assert!(p.sickness > SICKNESS_SECONDS - 1.0);
+        assert_eq!(p.resources, things);
+        assert_eq!(p.epoch, 1);
+        assert!(game.take_events().iter().any(|e| matches!(e, Event::Died { player } if *player == me)));
+
+        // A pose from before they knew is ignored; one with the new number is taken.
+        let before = start + Vec3::new(2.0, 0.0, 0.0);
+        game.apply(me, Command::SetPose { pos: before, yaw: 0.0, pitch: 0.0, epoch: 0 });
+        assert!((game.player(me).unwrap().body.pos - start).length() < 0.5);
+        game.apply(me, Command::SetPose { pos: before, yaw: 0.0, pitch: 0.0, epoch: 1 });
+        assert!((game.player(me).unwrap().body.pos - before).length() < 1e-4);
+
+        // The sickness runs out after a minute.
+        run(&mut game, SICKNESS_SECONDS + 1.0);
+        assert_eq!(game.player(me).unwrap().sickness, 0.0);
+    }
+
+    #[test]
+    fn sickness_makes_mining_and_conversion_take_twice_as_long() {
+        let mut game = Game::new(3);
+        let (well, sick) = (game.add_player(), game.add_player());
+        run(&mut game, 1.0);
+        game.player_mut_for_test(sick).sickness = SICKNESS_SECONDS;
+        for who in [well, sick] {
+            game.apply(who, Command::SetInput(looking_down()));
+            game.apply(who, Command::ToggleConversion(0));
+        }
+        run(&mut game, 0.5);
+        let (a, b) = (game.player(well).unwrap(), game.player(sick).unwrap());
+        // 0.5 s into a 0.55 s mine, and half way through for the sick one.
+        assert!(a.mine_timer > 0.4 || a.resources != Resources::test_kit(), "{}", a.mine_timer);
+        assert!(b.mine_timer < 0.3, "{}", b.mine_timer);
+        assert!((a.converter.fraction() / b.converter.fraction().max(1e-6) - 2.0).abs() < 0.2,
+            "{} vs {}", a.converter.fraction(), b.converter.fraction());
     }
 }

@@ -79,6 +79,13 @@ pub struct Combat {
     pub target: Option<Target>,
     /// The creatures' dice, shown next to the player's health bar.
     pub enemy_rolls: Vec<Roll>,
+    /// The player is slowed (resurrection sickness): they only get to attack in every other
+    /// round, while creatures still attack in every one.
+    pub slowed: bool,
+    /// Rounds begun so far, to tell every other one.
+    rounds: u32,
+    /// The round in progress is one the player doesn't attack in.
+    skip_player: bool,
     phase: Phase,
     /// The phase that follows the current one.
     then: Option<Phase>,
@@ -91,6 +98,9 @@ impl Combat {
             player_roll: None,
             target: None,
             enemy_rolls: Vec::new(),
+            slowed: false,
+            rounds: 0,
+            skip_player: false,
             phase: Phase::Idle,
             then: None,
         }
@@ -114,6 +124,9 @@ impl Combat {
         self.target = None;
         self.enemy_rolls.clear();
         self.phase = Phase::Idle;
+        // A slowed player attacks in the first round, then every other one.
+        self.skip_player = self.slowed && self.rounds % 2 == 1;
+        self.rounds = self.rounds.wrapping_add(1);
         let (now, later) = match first {
             Side::Enemy => (Phase::Enemies, Phase::Player),
             Side::Player => (Phase::Player, Phase::Enemies),
@@ -139,6 +152,7 @@ impl Combat {
                     self.phase = Phase::Enemies;
                 }
             }
+            Phase::Player if self.skip_player => self.advance(attackers, targets, dice),
             Phase::Player => {
                 // The weakest one in range; the lower id breaks a tie.
                 let weakest = targets
@@ -377,5 +391,32 @@ mod tests {
         let crowd: Vec<Candidate> = (1..=7).map(|id| c(id, 10)).collect();
         combat.begin_round(Side::Enemy, &crowd, &crowd, &mut dice);
         assert_eq!(combat.enemy_rolls.len(), MAX_ATTACKERS);
+    }
+
+    #[test]
+    fn a_slowed_player_attacks_in_every_other_round() {
+        let creature = [Candidate { id: 1, hp: 100 }];
+        let mut dice = Dice::with_seed(5);
+        let mut combat = Combat::new();
+        combat.player_hp = 100_000; // survives the whole test
+        combat.slowed = true;
+        let mut attacked = Vec::new();
+        let mut hit_back = Vec::new();
+        for _ in 0..6 {
+            combat.begin_round(Side::Player, &creature, &creature, &mut dice);
+            attacked.push(combat.player_roll.is_some());
+            combat.resolve_now(&mut dice, &creature, &creature);
+            hit_back.push(!combat.enemy_rolls.is_empty());
+        }
+        assert_eq!(attacked, [true, false, true, false, true, false]);
+        assert!(hit_back.iter().all(|h| *h), "creatures attack in every round");
+
+        // Well again: every round.
+        combat.slowed = false;
+        for _ in 0..4 {
+            combat.begin_round(Side::Enemy, &creature, &creature, &mut dice);
+            combat.resolve_now(&mut dice, &creature, &creature);
+            assert!(combat.player_roll.is_some());
+        }
     }
 }

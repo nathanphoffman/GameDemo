@@ -153,3 +153,10 @@ cargo test --release
 - Hill height and steepness: `generate` in `src/world.rs`
 - Walk speed, sprint speed, mouse sensitivity, field of view: constants at the top of `src/main.rs`
 - Jump height and gravity: constants at the top of `src/player.rs`
+
+## Dying
+
+If your health runs out you come back at the world's starting point at full health, keeping your
+resources, with Resurrection Sickness for 1 minute: mining, resource conversion and attacking
+are twice as slow (you attack in every other round). A purple bar under the resource list counts
+it down.

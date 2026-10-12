@@ -50,7 +50,7 @@ impl Player {
         let d = target - (pos + Vec3::new(0.0, 1.62, 0.0));
         let yaw = d.x.atan2(-d.z);
         let pitch = d.y.atan2(d.x.hypot(d.z));
-        self.send(Command::SetPose { pos, yaw, pitch });
+        self.send(Command::SetPose { pos, yaw, pitch, epoch: 0 });
     }
 }
 
@@ -134,7 +134,7 @@ fn a_session_of_building_and_fighting() {
     a.pump();
 
     let down = PlayerInput { mining: true, pitch: -1.4, ..PlayerInput::default() };
-    a.send(Command::SetPose { pos: spawn, yaw: 0.0, pitch: -1.4 });
+    a.send(Command::SetPose { pos: spawn, yaw: 0.0, pitch: -1.4, epoch: 0 });
     a.send(Command::SetInput(down));
     until("b seeing a crack and hearing a dig", 10, &mut [&mut a, &mut b], |ps| {
         let cracking = ps[1].mirror.latest.as_ref().unwrap().players.iter().any(|p| p.id == ps[0].mirror.you && p.cracking.is_some());

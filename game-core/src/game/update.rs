@@ -12,6 +12,9 @@ impl Game {
 
         // The fight: dice age and land, damage applies, replies roll; enemies move.
         for p in 0..self.players.len() {
+            let player = &mut self.players[p];
+            player.sickness = (player.sickness - dt).max(0.0);
+            player.combat.slowed = player.sickness > 0.0;
             let (attackers, targets) = self.fight_lists(p);
             self.players[p]
                 .combat
@@ -24,6 +27,7 @@ impl Game {
             }
             player.was_busy = busy;
         }
+        self.update_deaths();
         self.update_enemies(dt);
 
         // Only which weather it is lives here. How it looks to a player (snow in the cold,
@@ -32,6 +36,29 @@ impl Game {
         self.weather.update(dt);
 
         self.update_background(dt);
+    }
+
+    /// Players whose health ran out go back to where the world starts, healed, with
+    /// resurrection sickness for a while. They keep their resources.
+    fn update_deaths(&mut self) {
+        let start = self.world.spawn_point();
+        for player in &mut self.players {
+            if player.combat.player_hp > 0 {
+                continue;
+            }
+            player.body.pos = start;
+            player.body.vel_y = 0.0;
+            player.combat = Combat::new();
+            player.round_pause = 0.0;
+            player.mine_timer = 0.0;
+            player.was_busy = false;
+            player.since_pose = 0.0;
+            player.sickness = SICKNESS_SECONDS;
+            player.combat.slowed = true;
+            // Their computer is told, and until it says so poses from before are ignored.
+            player.epoch = player.epoch.wrapping_add(1);
+            self.events.push(Event::Died { player: player.id });
+        }
     }
 
     /// Walks the player along the keys held (unless they walk on their own computer).
@@ -50,7 +77,9 @@ impl Game {
         let on_block = self.block_in_sights_of(p).is_some();
         let player = &mut self.players[p];
         if player.input.mining && on_block {
-            player.mine_timer += dt;
+            // Resurrection sickness makes it take twice as long.
+            let slowdown = if player.sickness > 0.0 { SICKNESS_SLOWDOWN } else { 1.0 };
+            player.mine_timer += dt / slowdown;
             if player.mine_timer >= MINE_INTERVAL {
                 player.mine_timer -= MINE_INTERVAL;
                 self.mine(p);
@@ -73,9 +102,11 @@ impl Game {
                 } else {
                     1
                 };
-            player
-                .converter
-                .update(dt * player.conversion_boost as f32, &mut player.resources);
+            let slowdown = if player.sickness > 0.0 { SICKNESS_SLOWDOWN } else { 1.0 };
+            player.converter.update(
+                dt * player.conversion_boost as f32 / slowdown,
+                &mut player.resources,
+            );
         }
         for (x, y, z) in self.fires.update(dt) {
             // Only if it is still the burning block (it may have been mined).

@@ -41,6 +41,18 @@ How a game runs:
   punctuation; anything else shows as `?`.
 - **Player list**: hold Tab. Other players' names float over their heads (within 48 blocks).
 
+## Dying
+
+- When your health runs out you are put back at the spot where the world starts (the middle of
+  the map), at full health, and keep your resources. The chat says who died.
+- **Resurrection sickness** lasts 1 minute (`SICKNESS_SECONDS`), and dying again restarts it:
+  mining and conversion take twice as long, and you only get to attack in every other fight
+  round (creatures attack in every round). It shows as a purple bar with a countdown and a
+  short description under the resource list; the bar is drawn by the same code as the conversion bar.
+- It is per player, kept in saves (`SavedPlayer::sickness`), and told to the player in
+  `YouView::sickness`. The host moves the player, so positions the player's computer sent just
+  before are ignored (`Command::SetPose` carries an `epoch` that goes up on each death).
+
 ## Running it
 
 ```
@@ -83,6 +95,8 @@ The host listens on all addresses on its port and takes up to 16 players.
       blocks) and see cracks on the block they are mining.
 - [x] Creatures placed from the seed like terrain, more and tougher in dangerous biomes, and
       respawning after being defeated (about 350 in a world; only the ones near players exist).
+- [x] Dying: back to the start, full health, and 1 minute of resurrection sickness (half speed
+      mining, conversion and attacking) with a draining bar.
 - [x] Saving: single player and hosts keep the game in a file, written every 30 seconds and on
       exit, and carry on from it (`game::save`, `game-net` `save.rs`). Covered by tests and by
       quitting and restarting the real game.

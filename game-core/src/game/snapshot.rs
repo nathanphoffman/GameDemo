@@ -45,6 +45,10 @@ pub struct YouView {
     pub enemy_rolls: Vec<(u32, u32, f32)>,
     pub mine_timer: f32,
     pub conversion_boost: u32,
+    /// Seconds of resurrection sickness left (0 if none).
+    pub sickness: f32,
+    /// Changes when the host moves you (you died): put yourself where the snapshot says.
+    pub epoch: u32,
 }
 
 /// Everything about the game that a player's screen shows, apart from the blocks of the world
@@ -101,6 +105,8 @@ impl Game {
                 enemy_rolls: me.combat.enemy_rolls.iter().map(|r| r.view()).collect(),
                 mine_timer: me.mine_timer,
                 conversion_boost: me.conversion_boost,
+                sickness: me.sickness,
+                epoch: me.epoch,
             },
         })
     }
@@ -177,6 +183,8 @@ mod tests {
                 enemy_rolls: Vec::new(),
                 mine_timer: 0.0,
                 conversion_boost: 1,
+                sickness: 0.0,
+                epoch: 0,
             },
         }
     }
