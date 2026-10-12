@@ -26,6 +26,8 @@ const DAMAGE_LINE_DELAY: f32 = 0.4;
 pub struct HudVertex {
     pub pos: [f32; 2],
     pub color: [f32; 3],
+    /// 1 is solid; less lets the scene show through.
+    pub alpha: f32,
 }
 
 /// 3x5 pixel font: each row is 3 bits, most significant bit on the left.
@@ -105,6 +107,11 @@ struct Builder {
 impl Builder {
     /// Rectangle in pixels, measured from the top-left of the screen.
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
+        self.rect_alpha(x, y, w, h, color, 1.0);
+    }
+
+    /// Same, but only `alpha` solid (0 to 1).
+    fn rect_alpha(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3], alpha: f32) {
         let to_ndc = |px: f32, py: f32| [px / self.width * 2.0 - 1.0, 1.0 - py / self.height * 2.0];
         let (a, b, c, d) = (
             to_ndc(x, y),
@@ -113,7 +120,7 @@ impl Builder {
             to_ndc(x, y + h),
         );
         for pos in [a, b, c, a, c, d] {
-            self.verts.push(HudVertex { pos, color });
+            self.verts.push(HudVertex { pos, color, alpha });
         }
     }
 
@@ -131,6 +138,7 @@ impl Builder {
             self.verts.push(HudVertex {
                 pos: [x / self.width * 2.0 - 1.0, 1.0 - y / self.height * 2.0],
                 color,
+                alpha: 1.0,
             });
         }
     }
@@ -151,7 +159,7 @@ impl Builder {
             corner(-half, half),
         );
         for pos in [a, b, c, a, c, d] {
-            self.verts.push(HudVertex { pos, color });
+            self.verts.push(HudVertex { pos, color, alpha: 1.0 });
         }
     }
 
@@ -241,7 +249,7 @@ fn draw_roll(
     cx: f32,
     rest_y: f32,
     scale: f32,
-    (first, second, age): (u32, u32, f32),
+    (first, second, bonus, age): (u32, u32, i32, f32),
     style: &DiceStyle,
     text_below: bool,
 ) {
@@ -269,7 +277,7 @@ fn draw_roll(
     if age < ROLL_ANIM_SECONDS {
         return;
     }
-    let sum = first + second;
+    let sum = (first + second) as i32 + bonus;
     let text_scale = scale * 1.5;
     let line_height = 8.0 * text_scale;
     let (sum_y, damage_y) = if text_below {
@@ -279,7 +287,11 @@ fn draw_roll(
         let y = rest_y - die_size * 0.5 - 3.0 * scale - line_height;
         (y, y - line_height)
     };
-    b.centered_text(cx, sum_y, text_scale, &format!("{first} + {second} = {sum}"), style.sum_color);
+    b.centered_text(cx, sum_y, text_scale, &if bonus > 0 {
+            format!("{first} + {second} + {bonus} = {sum}")
+        } else {
+            format!("{first} + {second} = {sum}")
+        }, style.sum_color);
     if age >= ROLL_ANIM_SECONDS + DAMAGE_LINE_DELAY {
         b.centered_text(cx, damage_y, text_scale, &format!("DAMAGE {sum}"), style.damage_color);
     }
@@ -311,8 +323,8 @@ pub struct HudInfo<'a> {
     /// with a furnace).
     pub conversion_boost: u32,
     /// Each roll is (first die, second die, seconds since the roll started).
-    pub player_roll: Option<(u32, u32, f32)>,
-    pub enemy_rolls: &'a [(u32, u32, f32)],
+    pub player_roll: Option<(u32, u32, i32, f32)>,
+    pub enemy_rolls: &'a [(u32, u32, i32, f32)],
     /// (health shown on the bar, actual health, max health). The shown value trails the actual
     /// one after a hit, which paints the draining chunk.
     pub hp: (f32, i32, i32),
@@ -322,10 +334,59 @@ pub struct HudInfo<'a> {
     pub chat: &'a [String],
     /// The line being typed, if the chat is open.
     pub chat_input: Option<&'a str>,
+    /// How solid the grey box behind the chat is, 0 (gone) to 1 (fully faded in).
+    pub chat_box: f32,
     /// The names of everyone playing, if the list is being shown.
     pub player_list: Option<&'a [String]>,
     /// Names to float over other players: the text and where on the screen (pixels).
     pub name_tags: &'a [(String, f32, f32)],
+}
+
+/// The most wrapped chat rows on screen at once.
+const MAX_CHAT_ROWS: usize = 12;
+
+/// `text` broken into rows of at most `width` letters, at spaces where it can be. Rows after
+/// the first are indented two letters.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    // The letters of the row being built, not counting its indent.
+    let mut row = String::new();
+    let mut len = 0;
+    let indent_of = |rows: &Vec<String>| if rows.is_empty() { 0 } else { 2 };
+    let finish = |rows: &mut Vec<String>, row: &mut String| {
+        let indent = indent_of(rows);
+        rows.push(format!("{}{}", " ".repeat(indent), row));
+        row.clear();
+    };
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let room = width.saturating_sub(indent_of(&rows)).max(1);
+            let gap = usize::from(len > 0);
+            if len + gap + word.len() <= room {
+                if len > 0 {
+                    row.push(' ');
+                }
+                row.extend(word.iter());
+                len += gap + word.len();
+                break;
+            }
+            if len > 0 {
+                finish(&mut rows, &mut row);
+                len = 0;
+                continue;
+            }
+            // A word longer than a whole row is chopped.
+            let rest = word.split_off(room);
+            row.extend(word.iter());
+            finish(&mut rows, &mut row);
+            word = rest;
+        }
+    }
+    if len > 0 || rows.is_empty() {
+        finish(&mut rows, &mut row);
+    }
+    rows
 }
 
 /// Where a point in the world lands on the screen, in pixels from the top left, or None if
@@ -415,6 +476,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         sickness,
         chat,
         chat_input,
+        chat_box,
         player_list,
         name_tags,
     } = *info;
@@ -607,7 +669,9 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
     let (shown, actual, max) = hp;
     let max = max.max(1) as f32;
     let (bar_w, bar_h) = (80.0 * scale, 6.0 * scale);
-    let (bar_x, bar_y) = (cx - bar_w / 2.0, h - 8.0 * scale - bar_h);
+    // In the bottom right corner, out of the way of the chat.
+    let (bar_x, bar_y) = (w - margin - bar_w, h - 8.0 * scale - bar_h);
+    let bar_cx = bar_x + bar_w / 2.0;
     b.rect(
         bar_x - scale,
         bar_y - scale,
@@ -621,7 +685,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
     b.rect(bar_x, bar_y, bar_w * fraction(shown), bar_h, [0.95, 0.60, 0.20]);
     b.rect(bar_x, bar_y, bar_w * fraction(actual as f32), bar_h, [0.25, 0.78, 0.28]);
     b.centered_text(
-        cx,
+        bar_cx,
         bar_y - 7.0 * scale,
         scale,
         &format!("HP {}/{}", actual.max(0), max as i32),
@@ -631,8 +695,10 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
     let rest_y = bar_y - 7.0 * scale - 3.0 * scale - 8.0 * scale;
     let spacing = 17.0 * 4.0 * scale;
     let count = enemy_rolls.len() as f32;
+    // Centered over the bar, but slid left as far as it takes to keep every pair on screen.
+    let row_cx = bar_cx.min(w - margin - 22.0 * scale - (count - 1.0).max(0.0) / 2.0 * spacing);
     for (i, roll) in enemy_rolls.iter().enumerate() {
-        let x = cx + (i as f32 - (count - 1.0) / 2.0) * spacing;
+        let x = row_cx + (i as f32 - (count - 1.0) / 2.0) * spacing;
         draw_roll(&mut b, x, rest_y, scale, *roll, &ENEMY_DICE, false);
     }
 
@@ -658,27 +724,38 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         b.centered_text(*x, *y, scale, name, [1.0, 1.0, 0.8]);
     }
 
-    // Lower left: the chat, with the line being typed at the bottom. Lines are cut to fit the
-    // window (the end of what is being typed is the part that matters).
-    let fits = (((w * 0.9 - 2.0 * margin) / (4.0 * scale)) as usize).max(8);
+    // Lower left: the chat, with the line being typed at the bottom. Lines wrap at half the
+    // width of the screen, on a grey box that fades in while there is something to read.
+    let fits = (((w * 0.5 - 2.0 * margin) / (4.0 * scale)) as usize).max(8);
     let line = 7.0 * scale;
-    let mut bottom = h - margin - 6.0 * scale;
+    let bottom_edge = h - margin - 6.0 * scale;
+    let mut bottom = bottom_edge;
+    let mut rows: Vec<String> = Vec::new();
+    for text in chat {
+        rows.extend(wrap_text(text, fits));
+    }
+    let skip = rows.len().saturating_sub(MAX_CHAT_ROWS);
+    let rows = &rows[skip..];
+    let typing_rows = usize::from(chat_input.is_some());
+    if chat_box > 0.0 && (!rows.is_empty() || typing_rows > 0) {
+        let height = (rows.len() + typing_rows) as f32 * line + 2.0 * scale;
+        b.rect_alpha(
+            margin - 2.0 * scale,
+            bottom_edge + line - height - scale,
+            w * 0.5,
+            height + 2.0 * scale,
+            [0.12, 0.12, 0.14],
+            0.5 * chat_box.clamp(0.0, 1.0),
+        );
+    }
     if let Some(typing) = chat_input {
         let skip = (typing.chars().count() + 3).saturating_sub(fits);
         let shown = format!("> {}_", typing.chars().skip(skip).collect::<String>());
-        b.rect(
-            margin - scale,
-            bottom - scale,
-            w * 0.6,
-            line + scale,
-            [0.05, 0.05, 0.08],
-        );
         b.text(margin, bottom, scale, &shown, [1.0, 1.0, 1.0]);
-        bottom -= line + 2.0 * scale;
+        bottom -= line;
     }
-    for (i, text) in chat.iter().rev().enumerate() {
-        let text: String = text.chars().take(fits).collect();
-        b.text(margin, bottom - i as f32 * line, scale, &text, [0.9, 0.95, 1.0]);
+    for (i, text) in rows.iter().rev().enumerate() {
+        b.text(margin, bottom - i as f32 * line, scale, text, [0.9, 0.95, 1.0]);
     }
 
     // Top center: who is playing, while the list is held.
@@ -706,7 +783,7 @@ mod tests {
         let names = vec!["WWWWWWWWWWWWWWWW".to_string(); 16];
         let tags = vec![("WWWWWWWWWWWWWWWW".to_string(), 960.0, 400.0); 16];
         for age in [0.0, 0.3, 0.9, 1.4, 1.5, 1.7, 2.5, 3.0] {
-            for roll in [(1, 1, age), (6, 6, age), (3, 5, age)] {
+            for roll in [(1, 1, 0, age), (6, 6, 0, age), (3, 5, 5, age)] {
                 let four = [roll; 4];
                 let info = HudInfo {
                     resources: [99999; KINDS],
@@ -724,6 +801,7 @@ mod tests {
                     sickness: Some((59.0, 60.0)),
                     chat: &chat,
                     chat_input: Some("HELLO THERE FRIENDS"),
+                    chat_box: 1.0,
                     player_list: Some(&names),
                     name_tags: &tags,
                 };
@@ -750,11 +828,22 @@ mod tests {
                 sickness: None,
                 chat: &[],
                 chat_input: None,
+                chat_box: 0.0,
                 player_list: None,
                 name_tags: &[],
             },
         );
         assert!(quiet.len() < 6000, "{}", quiet.len());
+    }
+
+    #[test]
+    fn long_text_wraps_at_spaces_and_chops_huge_words() {
+        assert_eq!(wrap_text("ONE TWO THREE", 20), ["ONE TWO THREE"]);
+        assert_eq!(wrap_text("ONE TWO THREE FOUR", 11), ["ONE TWO", "  THREE", "  FOUR"]);
+        let chopped = wrap_text(&"W".repeat(25), 10);
+        assert!(chopped.iter().all(|r| r.chars().count() <= 10), "{chopped:?}");
+        assert_eq!(chopped.concat().replace(' ', "").len(), 25);
+        assert_eq!(wrap_text("", 10), [""]);
     }
 
     #[test]

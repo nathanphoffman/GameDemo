@@ -41,8 +41,8 @@ pub struct YouView {
     pub converting: Option<(usize, f32)>,
     pub hp: i32,
     /// Dice as (a, b, age), for the player's roll and for the creatures'.
-    pub player_roll: Option<(u32, u32, f32)>,
-    pub enemy_rolls: Vec<(u32, u32, f32)>,
+    pub player_roll: Option<(u32, u32, i32, f32)>,
+    pub enemy_rolls: Vec<(u32, u32, i32, f32)>,
     pub mine_timer: f32,
     pub conversion_boost: u32,
     /// Seconds of resurrection sickness left (0 if none).

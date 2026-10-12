@@ -80,6 +80,19 @@ impl Kind {
         }
     }
 
+    /// Added to the creature's dice when it attacks: nothing for the basic ones, and more
+    /// the tougher the zone.
+    pub fn damage_bonus(self) -> i32 {
+        match self {
+            Kind::Deer | Kind::Boar | Kind::Wolf => 0,
+            Kind::Scorpion => 1,
+            Kind::BogZombie => 2,
+            Kind::Yeti => 3,
+            Kind::Golem => 4,
+            Kind::Skeleton => 5,
+        }
+    }
+
     /// Blocks per second when chasing or walking home. Well under the player's walk (5).
     fn chase_speed(self) -> f32 {
         match self {

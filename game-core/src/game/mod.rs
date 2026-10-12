@@ -175,6 +175,9 @@ pub enum Event {
     RoundSkipped { player: PlayerId },
     /// A player's health ran out: they are back at the start, with resurrection sickness.
     Died { player: PlayerId },
+    /// A roll landed in `player`'s fight, either theirs against `enemy` or the creature's
+    /// against them. The damage is both dice plus `bonus`.
+    Hit { player: PlayerId, enemy: crate::enemy::Kind, by_player: bool, dice: (u32, u32), bonus: i32, killed: bool },
 }
 
 pub struct Game {

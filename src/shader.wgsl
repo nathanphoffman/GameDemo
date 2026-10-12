@@ -157,18 +157,18 @@ fn crack_fs(in: BlockOut) -> @location(0) vec4<f32> {
 
 struct HudOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>,
 };
 
 @vertex
-fn hud_vs(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> HudOut {
+fn hud_vs(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>, @location(2) alpha: f32) -> HudOut {
     var o: HudOut;
     o.pos = vec4(pos, 0.0, 1.0);
-    o.color = color;
+    o.color = vec4(color, alpha);
     return o;
 }
 
 @fragment
 fn hud_fs(in: HudOut) -> @location(0) vec4<f32> {
-    return vec4(in.color, 1.0);
+    return in.color;
 }

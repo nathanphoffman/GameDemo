@@ -31,6 +31,14 @@ impl App {
         self.weather.biome = self.mirror.world.biome(px, pz);
         self.weather.snowing = self.weather.biome == Biome::Snow;
         self.weather.underwater = self.mirror.world.in_water(self.body.eye());
+        // Write up a change in the chat, if it is one that reaches us (a desert doesn't notice
+        // fog turning to mist, for one).
+        let reaches_us = self.weather.effective_kind();
+        if self.weather.kind != self.announced_weather.0 && reaches_us != self.announced_weather.1 {
+            let line = narrate::weather_change(reaches_us, self.weather.snowing, self.weather.biome);
+            self.log_line(&format!("* {line}"));
+        }
+        self.announced_weather = (self.weather.kind, reaches_us);
         self.weather.update(dt);
         if let Some(music) = &mut self.music {
             // Rain you hear is snow in the cold; either way it is as loud as the rain is.
@@ -86,6 +94,15 @@ impl App {
 
         // Chat, the list of players, and names floating over the others.
         let chat = self.visible_chat();
+        // The grey box behind it fades in while there is something to read.
+        let want = if !chat.is_empty() || self.chat_input.is_some() { 1.0 } else { 0.0 };
+        let speed = if want > self.chat_box { 5.0 } else { 2.0 };
+        let step = speed * dt;
+        self.chat_box = if want > self.chat_box {
+            (self.chat_box + step).min(want)
+        } else {
+            (self.chat_box - step).max(want)
+        };
         let player_list: Vec<String> = self
             .mirror
             .roster
@@ -121,6 +138,7 @@ impl App {
                         .then_some((you.sickness, game::SICKNESS_SECONDS)),
                     chat: &chat,
                     chat_input: self.chat_input.as_deref().map(hud::display_text).as_deref(),
+                    chat_box: self.chat_box,
                     player_list: self.show_players.then_some(&player_list[..]),
                     name_tags: &name_tags,
                 },

@@ -35,6 +35,7 @@ use crate::gfx::{Gfx, FOV_Y_DEGREES};
 use crate::hud::{self, HudInfo};
 use crate::mesh::{self, Vertex};
 use crate::music;
+use crate::narrate;
 use crate::player::Player;
 use crate::weather::Weather;
 use crate::world::{self, World};
@@ -110,6 +111,10 @@ pub(crate) struct App {
     connection_lost: bool,
     /// Chat lines (already in showable form) and when they arrived.
     chat_log: Vec<(Instant, String)>,
+    /// How far the grey box behind the chat has faded in, 0 to 1.
+    chat_box: f32,
+    /// The weather last written up in the chat: what the world's was, and what reached us.
+    announced_weather: (crate::weather::Kind, crate::weather::Kind),
     /// The line being typed, while the chat is open.
     chat_input: Option<String>,
     /// Tab is held: show who is playing.
@@ -154,6 +159,8 @@ impl App {
             cursor_locked: false,
             connection_lost: false,
             chat_log: Vec::new(),
+            chat_box: 0.0,
+            announced_weather: (crate::weather::Kind::Sunny, crate::weather::Kind::Sunny),
             chat_input: None,
             show_players: false,
             music: music::Music::start(),
@@ -188,10 +195,7 @@ impl App {
                     } else {
                         format!("{from}: {text}")
                     };
-                    self.chat_log.push((Instant::now(), hud::display_text(&line)));
-                    // Keep the log short: only the last few lines are ever shown.
-                    let extra = self.chat_log.len().saturating_sub(40);
-                    self.chat_log.drain(..extra);
+                    self.log_line(&line);
                 }
                 Update::Roster(_) => {}
             }
@@ -239,6 +243,17 @@ impl App {
                     let line = format!("* {} DIED", hud::display_text(&who));
                     self.chat_log.push((Instant::now(), line));
                 }
+                Event::Hit { player, enemy, by_player, dice, bonus, killed } if player == self.me => {
+                    let line = if by_player {
+                        narrate::player_hit(enemy, dice)
+                    } else {
+                        narrate::creature_hit(enemy, dice, bonus)
+                    };
+                    self.log_line(&format!("* {line}"));
+                    if killed {
+                        self.log_line(&format!("* {}", narrate::creature_down(enemy)));
+                    }
+                }
                 Event::RoundSkipped { player } if player == self.me => {
                     // The health bar jumps to its final value instead of draining.
                     self.hp_shown = tick.snapshot.you.hp as f32;
@@ -246,6 +261,14 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// Adds a line to the chat box.
+    fn log_line(&mut self, line: &str) {
+        self.chat_log.push((Instant::now(), hud::display_text(line)));
+        // Keep the log short: only the last few lines are ever shown.
+        let extra = self.chat_log.len().saturating_sub(40);
+        self.chat_log.drain(..extra);
     }
 
     /// Says what has been typed (if anything) and closes the chat.

@@ -20,6 +20,8 @@ pub enum Side {
 pub struct Candidate {
     pub id: u32,
     pub hp: i32,
+    /// Added to this creature's dice when it attacks (0 for the basic ones).
+    pub bonus: i32,
 }
 
 /// One 2d6 roll. Its damage lands when the dice finish tumbling.
@@ -27,28 +29,45 @@ pub struct Candidate {
 pub struct Roll {
     pub a: u32,
     pub b: u32,
+    /// Added to the two dice (0 for the player and the basic creatures).
+    pub bonus: i32,
     pub age: f32,
     pub applied: bool,
 }
 
 impl Roll {
-    fn new((a, b): (u32, u32)) -> Roll {
+    fn new((a, b): (u32, u32), bonus: i32) -> Roll {
         Roll {
             a,
             b,
+            bonus,
             age: 0.0,
             applied: false,
         }
     }
 
+    /// The damage: both dice and the bonus.
     pub fn sum(&self) -> i32 {
-        (self.a + self.b) as i32
+        (self.a + self.b) as i32 + self.bonus
     }
 
-    /// (first die, second die, seconds since the roll started), as the HUD wants it.
-    pub fn view(&self) -> (u32, u32, f32) {
-        (self.a, self.b, self.age)
+    /// (first die, second die, bonus, seconds since the roll started), as the HUD wants it.
+    pub fn view(&self) -> (u32, u32, i32, f32) {
+        (self.a, self.b, self.bonus, self.age)
     }
+}
+
+/// A roll that has landed, for the game to announce. The creature is `enemy`; `by_player`
+/// says which way the hit went.
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    pub enemy: u32,
+    pub by_player: bool,
+    pub a: u32,
+    pub b: u32,
+    pub bonus: i32,
+    /// The creature has no health left after this hit.
+    pub killed: bool,
 }
 
 /// The enemy the player's roll is against, and its health once that roll has landed.
@@ -82,6 +101,10 @@ pub struct Combat {
     /// The player is slowed (resurrection sickness): they only get to attack in every other
     /// round, while creatures still attack in every one.
     pub slowed: bool,
+    /// Which creature rolled each of `enemy_rolls`, in the same order.
+    enemy_ids: Vec<u32>,
+    /// Hits that have landed and not been announced yet (the game empties this).
+    pub landed: Vec<Hit>,
     /// Rounds begun so far, to tell every other one.
     rounds: u32,
     /// The round in progress is one the player doesn't attack in.
@@ -99,6 +122,8 @@ impl Combat {
             target: None,
             enemy_rolls: Vec::new(),
             slowed: false,
+            enemy_ids: Vec::new(),
+            landed: Vec::new(),
             rounds: 0,
             skip_player: false,
             phase: Phase::Idle,
@@ -123,6 +148,7 @@ impl Combat {
         self.player_roll = None;
         self.target = None;
         self.enemy_rolls.clear();
+        self.enemy_ids.clear();
         self.phase = Phase::Idle;
         // A slowed player attacks in the first round, then every other one.
         self.skip_player = self.slowed && self.rounds % 2 == 1;
@@ -139,16 +165,14 @@ impl Combat {
     fn start(&mut self, phase: Phase, attackers: &[Candidate], targets: &[Candidate], dice: &mut Dice) {
         match phase {
             Phase::Enemies => {
-                let rolls: Vec<Roll> = attackers
-                    .iter()
-                    .filter(|c| c.hp > 0)
-                    .take(MAX_ATTACKERS)
-                    .map(|_| Roll::new(dice.roll_2d6()))
-                    .collect();
-                if rolls.is_empty() || self.player_hp <= 0 {
+                let fighters: Vec<&Candidate> =
+                    attackers.iter().filter(|c| c.hp > 0).take(MAX_ATTACKERS).collect();
+                if fighters.is_empty() || self.player_hp <= 0 {
                     self.advance(attackers, targets, dice);
                 } else {
-                    self.enemy_rolls = rolls;
+                    self.enemy_rolls =
+                        fighters.iter().map(|c| Roll::new(dice.roll_2d6(), c.bonus)).collect();
+                    self.enemy_ids = fighters.iter().map(|c| c.id).collect();
                     self.phase = Phase::Enemies;
                 }
             }
@@ -162,7 +186,7 @@ impl Combat {
                 match weakest {
                     Some(c) if self.player_hp > 0 => {
                         self.target = Some(Target { id: c.id, hp: c.hp });
-                        self.player_roll = Some(Roll::new(dice.roll_2d6()));
+                        self.player_roll = Some(Roll::new(dice.roll_2d6(), 0));
                         self.phase = Phase::Player;
                     }
                     _ => self.advance(attackers, targets, dice),
@@ -200,9 +224,17 @@ impl Combat {
                     .iter()
                     .all(|r| r.age >= ROLL_ANIM_SECONDS);
                 if landed {
-                    for r in &mut self.enemy_rolls {
+                    for (i, r) in self.enemy_rolls.iter_mut().enumerate() {
                         r.applied = true;
                         self.player_hp = (self.player_hp - r.sum()).max(0);
+                        self.landed.push(Hit {
+                            enemy: self.enemy_ids[i],
+                            by_player: false,
+                            a: r.a,
+                            b: r.b,
+                            bonus: r.bonus,
+                            killed: false,
+                        });
                     }
                     self.advance(attackers, targets, dice);
                 }
@@ -215,6 +247,14 @@ impl Combat {
                     if let (Some(roll), Some(target)) = (&mut self.player_roll, &mut self.target) {
                         roll.applied = true;
                         target.hp = (target.hp - roll.sum()).max(0);
+                        self.landed.push(Hit {
+                            enemy: target.id,
+                            by_player: true,
+                            a: roll.a,
+                            b: roll.b,
+                            bonus: 0,
+                            killed: target.hp == 0,
+                        });
                     }
                     self.advance(attackers, targets, dice);
                 }
@@ -259,7 +299,7 @@ mod tests {
     use super::*;
 
     fn c(id: u32, hp: i32) -> Candidate {
-        Candidate { id, hp }
+        Candidate { id, hp, bonus: 0 }
     }
 
     fn step(combat: &mut Combat, dice: &mut Dice, seconds: f32, a: &[Candidate], t: &[Candidate]) {
@@ -395,7 +435,7 @@ mod tests {
 
     #[test]
     fn a_slowed_player_attacks_in_every_other_round() {
-        let creature = [Candidate { id: 1, hp: 100 }];
+        let creature = [Candidate { id: 1, hp: 100, bonus: 0 }];
         let mut dice = Dice::with_seed(5);
         let mut combat = Combat::new();
         combat.player_hp = 100_000; // survives the whole test

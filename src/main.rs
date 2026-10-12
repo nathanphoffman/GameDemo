@@ -3,6 +3,7 @@ mod gfx;
 mod hud;
 mod mesh;
 mod music;
+mod narrate;
 mod textures;
 
 // The game's rules live in the library; these keep the `crate::world::...` style paths working.

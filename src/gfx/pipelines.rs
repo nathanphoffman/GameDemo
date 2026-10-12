@@ -19,6 +19,8 @@ struct Spec<'a> {
     buffers: &'a [wgpu::VertexBufferLayout<'a>],
     depth_write: bool,
     depth_test: bool,
+    /// Draw see-through where the vertex alpha is below 1.
+    blend: bool,
 }
 
 fn make_pipeline(
@@ -42,7 +44,7 @@ fn make_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None,
+                blend: spec.blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -92,7 +94,7 @@ pub(super) fn create_pipelines(
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &block_attrs,
     };
-    let hud_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3];
+    let hud_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3, 2 => Float32];
     let hud_layout = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<HudVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -108,6 +110,7 @@ pub(super) fn create_pipelines(
             buffers: &[],
             depth_write: false,
             depth_test: false,
+            blend: false,
         }),
         block: build(Spec {
             layout: &layout,
@@ -116,6 +119,7 @@ pub(super) fn create_pipelines(
             buffers: std::slice::from_ref(&block_layout),
             depth_write: true,
             depth_test: true,
+            blend: false,
         }),
         crack: build(Spec {
             layout: &layout,
@@ -124,6 +128,7 @@ pub(super) fn create_pipelines(
             buffers: std::slice::from_ref(&block_layout),
             depth_write: false,
             depth_test: true,
+            blend: false,
         }),
         hud: build(Spec {
             layout: &empty_layout,
@@ -132,6 +137,7 @@ pub(super) fn create_pipelines(
             buffers: std::slice::from_ref(&hud_layout),
             depth_write: false,
             depth_test: false,
+            blend: true,
         }),
     }
 }

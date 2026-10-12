@@ -19,6 +19,7 @@ impl Game {
             self.players[p]
                 .combat
                 .update(dt, &mut self.dice, &attackers, &targets);
+            self.announce_hits(p);
             self.sync_enemies(p);
             let player = &mut self.players[p];
             let busy = player.combat.busy();

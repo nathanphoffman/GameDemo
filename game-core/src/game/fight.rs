@@ -40,6 +40,7 @@ impl Game {
             .map(|e| Candidate {
                 id: e.id,
                 hp: e.health,
+                bonus: e.kind.damage_bonus(),
             })
             .collect()
     }
@@ -71,6 +72,7 @@ impl Game {
             .combat
             .resolve_now(&mut self.dice, &attackers, &targets);
         self.events.push(Event::RoundSkipped { player: self.players[p].id });
+        self.announce_hits(p);
         self.sync_enemies(p);
 
         if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == sight.id) {
@@ -80,6 +82,23 @@ impl Game {
         self.players[p]
             .combat
             .begin_round(Side::Player, &attackers, &targets, &mut self.dice);
+    }
+
+    /// Turns the hits that just landed into events, so every screen can write them up.
+    pub(super) fn announce_hits(&mut self, p: usize) {
+        let player = self.players[p].id;
+        for hit in std::mem::take(&mut self.players[p].combat.landed) {
+            if let Some(enemy) = self.enemies.iter().find(|e| e.id == hit.enemy) {
+                self.events.push(Event::Hit {
+                    player,
+                    enemy: enemy.kind,
+                    by_player: hit.by_player,
+                    dice: (hit.a, hit.b),
+                    bonus: hit.bonus,
+                    killed: hit.killed,
+                });
+            }
+        }
     }
 
     /// Copies the fight's result onto the creature it hit, and removes the dead.
