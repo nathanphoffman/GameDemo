@@ -94,11 +94,9 @@ struct Gfx {
     outline_index_count: u32,
     outline_visible: bool,
     enemy_vertices: wgpu::Buffer,
-    enemy_crack_vertices: wgpu::Buffer,
     enemy_indices: wgpu::Buffer,
     enemy_index_count: u32,
     enemy_visible: bool,
-    enemy_cracked: bool,
     mesh_vertices: wgpu::Buffer,
     mesh_indices: wgpu::Buffer,
     mesh_index_count: u32,
@@ -367,16 +365,12 @@ impl Gfx {
             usage: wgpu::BufferUsages::INDEX,
         });
         let enemy_buffer_size = (enemy::VERTEX_COUNT * std::mem::size_of::<Vertex>()) as u64;
-        let make_enemy_buffer = |label| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: enemy_buffer_size,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
-        let enemy_vertices = make_enemy_buffer("enemy vertices");
-        let enemy_crack_vertices = make_enemy_buffer("enemy cracks");
+        let enemy_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("enemy vertices"),
+            size: enemy_buffer_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let enemy_index_list = enemy::indices();
         let enemy_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("enemy indices"),
@@ -411,11 +405,9 @@ impl Gfx {
             outline_index_count: outline_i.len() as u32,
             outline_visible: false,
             enemy_vertices,
-            enemy_crack_vertices,
             enemy_indices,
             enemy_index_count: enemy_index_list.len() as u32,
             enemy_visible: false,
-            enemy_cracked: false,
             mesh_vertices,
             mesh_indices,
             mesh_index_count: indices.len() as u32,
@@ -443,18 +435,12 @@ impl Gfx {
         }
     }
 
-    /// Uploads the enemy's body (and its crack overlay, if any), or hides him with None.
-    fn set_enemy(&mut self, mesh: Option<(Vec<Vertex>, Option<Vec<Vertex>>)>) {
+    /// Uploads the enemy's body and health bar, or hides him with None.
+    fn set_enemy(&mut self, mesh: Option<Vec<Vertex>>) {
         self.enemy_visible = mesh.is_some();
-        self.enemy_cracked = false;
-        if let Some((body, cracks)) = mesh {
+        if let Some(vertices) = mesh {
             self.queue
-                .write_buffer(&self.enemy_vertices, 0, bytemuck::cast_slice(&body));
-            if let Some(cracks) = cracks {
-                self.queue
-                    .write_buffer(&self.enemy_crack_vertices, 0, bytemuck::cast_slice(&cracks));
-                self.enemy_cracked = true;
-            }
+                .write_buffer(&self.enemy_vertices, 0, bytemuck::cast_slice(&vertices));
         }
     }
 
@@ -555,11 +541,6 @@ impl Gfx {
                 pass.set_vertex_buffer(0, self.enemy_vertices.slice(..));
                 pass.set_index_buffer(self.enemy_indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.enemy_index_count, 0, 0..1);
-                if self.enemy_cracked {
-                    pass.set_pipeline(&self.crack_pipeline);
-                    pass.set_vertex_buffer(0, self.enemy_crack_vertices.slice(..));
-                    pass.draw_indexed(0..self.enemy_index_count, 0, 0..1);
-                }
             }
 
             if self.outline_visible {
@@ -804,11 +785,7 @@ impl ApplicationHandler for App {
                 });
 
                 let look_at = self.player.pos;
-                let enemy_mesh = self.enemy.as_ref().map(|e| {
-                    let body = e.mesh(look_at, false);
-                    let cracks = e.cracked().then(|| e.mesh(look_at, true));
-                    (body, cracks)
-                });
+                let enemy_mesh = self.enemy.as_ref().map(|e| e.mesh(look_at));
 
                 if let Some(gfx) = &mut self.gfx {
                     gfx.set_outline(outline);

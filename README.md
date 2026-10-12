@@ -41,7 +41,7 @@ Hold the left mouse button while the crosshair is on a block. Every two-thirds o
 
 ## Attacking
 
-A skeleton stands a few blocks ahead of where you spawn. Aim at him (within 5 blocks): he gets a wireframe highlight instead of the block behind him. Every left click rolls 2d6: two dice tumble across the top of the screen, land, and show the sum and the damage, which is applied as they land. Clicking again mid-roll starts a new roll. He starts at 12 health, shows cracks at 6 or less, and disappears at 0.
+A skeleton stands a few blocks ahead of where you spawn. Aim at him (within 5 blocks): he gets a wireframe highlight instead of the block behind him. Every left click rolls 2d6: two dice tumble across the top of the screen, land, and show the sum and the damage, which is applied as they land. Clicking again mid-roll starts a new roll. He starts at 12 health, has a health bar floating over his head that shrinks as he takes damage, and disappears at 0.
 
 ## Layout
 

@@ -12,10 +12,17 @@ const HALF_WIDTH: f32 = 0.4;
 const BONE: f32 = 13.0;
 const SKULL: f32 = 14.0;
 const RIBS: f32 = 15.0;
-const CRACKS: f32 = 11.0;
+const BAR_BACK: f32 = 12.0; // near-black border
+const BAR_LOST: f32 = 16.0; // red
+const BAR_HEALTH: f32 = 17.0; // green
 
-/// How far the crack overlay sits off the body.
-const GROW: f32 = 0.004;
+/// Health bar size and how high it floats above the head, in blocks.
+const BAR_WIDTH: f32 = 0.9;
+const BAR_HEIGHT: f32 = 0.12;
+const BAR_BORDER: f32 = 0.025;
+const BAR_LIFT: f32 = 0.35;
+/// Each bar layer sits this much closer to the viewer so they don't fight in the depth buffer.
+const BAR_LAYER_GAP: f32 = 0.01;
 
 pub struct Enemy {
     /// Bottom center of the skeleton.
@@ -31,7 +38,8 @@ struct Part {
 }
 
 const PARTS: usize = 6;
-pub const VERTEX_COUNT: usize = PARTS * 6 * 4;
+/// The body boxes, then the three quads of the health bar.
+pub const VERTEX_COUNT: usize = PARTS * 6 * 4 + 3 * 4;
 
 fn parts() -> [Part; PARTS] {
     [
@@ -88,19 +96,12 @@ impl Enemy {
         )
     }
 
-    /// Shows cracks once he is at half health or lower.
-    pub fn cracked(&self) -> bool {
-        self.health * 2 <= MAX_HEALTH
-    }
-
-    /// Body vertices, with the front turned toward `look_at`. With `cracks` set, returns the
-    /// same shape slightly inflated and using the crack texture, to draw on top.
-    pub fn mesh(&self, look_at: Vec3, cracks: bool) -> Vec<Vertex> {
+    /// Body and health bar vertices, with the front (and the bar) turned toward `look_at`.
+    pub fn mesh(&self, look_at: Vec3) -> Vec<Vertex> {
         let front = Vec3::new(look_at.x - self.pos.x, 0.0, look_at.z - self.pos.z)
             .try_normalize()
             .unwrap_or(Vec3::Z);
         let right = Vec3::new(front.z, 0.0, -front.x);
-        let grow = if cracks { GROW } else { 0.0 };
 
         let mut out = Vec::with_capacity(VERTEX_COUNT);
         for part in parts() {
@@ -110,19 +111,52 @@ impl Enemy {
                     let mut local = [0.0f32; 3];
                     for k in 0..3 {
                         let size = part.max[k] - part.min[k];
-                        local[k] = part.min[k] - grow + c[k] * (size + 2.0 * grow);
+                        local[k] = part.min[k] + c[k] * size;
                     }
                     let p = self.pos + right * local[0] + Vec3::Y * local[1] + front * local[2];
                     out.push(Vertex {
                         pos: p.to_array(),
                         uv: face.uv[i],
-                        layer: if cracks { CRACKS } else { part.layers[f] },
-                        shade: if cracks { 1.0 } else { face.shade },
+                        layer: part.layers[f],
+                        shade: face.shade,
                     });
                 }
             }
         }
+        self.push_health_bar(&mut out, front, right);
         out
+    }
+
+    /// Three flat quads facing the viewer: border, red (missing health), green (health left).
+    /// The green one is anchored to one end so it shrinks as he takes damage.
+    fn push_health_bar(&self, out: &mut Vec<Vertex>, front: Vec3, right: Vec3) {
+        let fraction = (self.health.max(0) as f32 / MAX_HEALTH as f32).clamp(0.0, 1.0);
+        let center = self.pos + Vec3::Y * (HEIGHT + BAR_LIFT);
+        let (half_w, half_h) = (BAR_WIDTH / 2.0, BAR_HEIGHT / 2.0);
+
+        // (left edge, right edge, half height, layer, how far toward the viewer)
+        let quads = [
+            (-half_w - BAR_BORDER, half_w + BAR_BORDER, half_h + BAR_BORDER, BAR_BACK, 0.0),
+            (-half_w, half_w, half_h, BAR_LOST, BAR_LAYER_GAP),
+            (
+                -half_w,
+                -half_w + BAR_WIDTH * fraction,
+                half_h,
+                BAR_HEALTH,
+                2.0 * BAR_LAYER_GAP,
+            ),
+        ];
+        for (left, right_edge, height, layer, lift) in quads {
+            let origin = center + front * (0.1 + lift);
+            for (x, y) in [(left, -height), (left, height), (right_edge, height), (right_edge, -height)] {
+                out.push(Vertex {
+                    pos: (origin + right * x + Vec3::Y * y).to_array(),
+                    uv: [0.0, 0.0],
+                    layer,
+                    shade: 1.0,
+                });
+            }
+        }
     }
 }
 
@@ -225,16 +259,28 @@ mod tests {
     }
 
     #[test]
-    fn mesh_matches_index_list_and_cracks_at_half() {
-        let mut e = Enemy::new(Vec3::new(10.0, 5.0, 10.0));
-        let v = e.mesh(Vec3::new(0.0, 5.0, 0.0), false);
+    fn mesh_matches_index_list() {
+        let e = Enemy::new(Vec3::new(10.0, 5.0, 10.0));
+        let v = e.mesh(Vec3::new(0.0, 5.0, 0.0));
         assert_eq!(v.len(), VERTEX_COUNT);
         assert!(indices().iter().all(|&i| (i as usize) < v.len()));
-        assert!(!e.cracked());
-        e.health = 7;
-        assert!(!e.cracked());
+    }
+
+    #[test]
+    fn health_bar_shrinks_with_health() {
+        let mut e = Enemy::new(Vec3::new(10.0, 5.0, 10.0));
+        let width = |e: &Enemy| {
+            // The green quad is the last four vertices.
+            let v = e.mesh(Vec3::ZERO);
+            let g = &v[v.len() - 4..];
+            assert_eq!(g[0].layer, BAR_HEALTH);
+            (Vec3::from(g[3].pos) - Vec3::from(g[0].pos)).length()
+        };
+        let full = width(&e);
+        assert!((full - BAR_WIDTH).abs() < 1e-4);
         e.health = 6;
-        assert!(e.cracked());
-        assert_eq!(e.mesh(Vec3::ZERO, true).len(), VERTEX_COUNT);
+        assert!((width(&e) - BAR_WIDTH / 2.0).abs() < 1e-4);
+        e.health = 3;
+        assert!((width(&e) - BAR_WIDTH / 4.0).abs() < 1e-4);
     }
 }

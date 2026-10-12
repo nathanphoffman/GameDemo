@@ -1,11 +1,11 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 16; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 18; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
-                            // 13 bone, 14 skull face, 15 ribs
+                            // 13 bone, 14 skull face, 15 ribs, 16 red, 17 green (health bar)
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -66,6 +66,12 @@ fn tile(layer: u32) -> Vec<u8> {
     }
     if layer == 11 {
         return cracks(9, 9, 41);
+    }
+    if layer == 16 {
+        return [205, 45, 45, 255].repeat((TILE * TILE) as usize);
+    }
+    if layer == 17 {
+        return [70, 205, 70, 255].repeat((TILE * TILE) as usize);
     }
     if layer == 12 {
         return [12, 12, 12, 255].repeat((TILE * TILE) as usize);
