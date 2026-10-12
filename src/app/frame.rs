@@ -84,6 +84,16 @@ impl App {
 
         let menu_labels = self.menu_labels();
 
+        // Chat, the list of players, and names floating over the others.
+        let chat = self.visible_chat();
+        let player_list: Vec<String> = self
+            .mirror
+            .roster
+            .iter()
+            .map(|(_, name)| hud::display_text(name))
+            .collect();
+        let name_tags = self.name_tags();
+
         if let Some(gfx) = &mut self.gfx {
             gfx.set_outline(outline);
             gfx.set_crack(crack);
@@ -107,6 +117,10 @@ impl App {
                     player_roll: you.player_roll,
                     enemy_rolls: &you.enemy_rolls,
                     hp: (self.hp_shown, you.hp, MAX_PLAYER_HP),
+                    chat: &chat,
+                    chat_input: self.chat_input.as_deref().map(hud::display_text).as_deref(),
+                    player_list: self.show_players.then_some(&player_list[..]),
+                    name_tags: &name_tags,
                 },
             );
             let time = self.started.elapsed().as_secs_f32();
@@ -127,6 +141,28 @@ impl App {
                     size.height / 2,
                 ));
             }
+    }
+
+    /// Other players' names, with where on the screen to write them.
+    fn name_tags(&self) -> Vec<(String, f32, f32)> {
+        const RANGE: f32 = 48.0;
+        let Some(gfx) = &self.gfx else {
+            return Vec::new();
+        };
+        let (width, height) = (gfx.config.width as f32, gfx.config.height as f32);
+        let view = Mat4::look_to_rh(self.body.eye(), self.body.forward(), Vec3::Y);
+        let proj = Mat4::perspective_rh(FOV_Y_DEGREES.to_radians(), width / height, 0.05, 1000.0);
+        self.scene
+            .players
+            .iter()
+            .filter(|p| p.id != self.me && p.pos.distance(self.body.pos) <= RANGE)
+            .filter_map(|p| {
+                let name = self.mirror.name_of(p.id)?;
+                let above = p.pos + Vec3::new(0.0, 2.7, 0.0);
+                let (x, y) = hud::project_to_screen(proj * view, above, width, height)?;
+                Some((hud::display_text(name), x, y))
+            })
+            .collect()
     }
 
     /// With a dense resource selected: what right click would build on the block the

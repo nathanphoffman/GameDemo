@@ -10,16 +10,25 @@ use game_core::{biome, combat, effects, enemy, game, player, weather, world};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// What to call the player when they haven't said: their login name.
+fn default_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "PLAYER".to_string())
+}
+
 fn main() {
-    // `gamedemo` or `gamedemo 42` plays alone (42 picks the world); `gamedemo join host:7777`
-    // joins a game run by `gamedemo-host`.
+    // `gamedemo` or `gamedemo 42` plays alone (42 picks the world); `gamedemo join host:7777
+    // [name]` joins a game run by `gamedemo-host`. Coming back with the same name gets your
+    // things back.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("join") {
         let Some(addr) = args.get(1) else {
-            eprintln!("usage: gamedemo join <address:port>");
+            eprintln!("usage: gamedemo join <address:port> [name]");
             std::process::exit(1);
         };
-        app::run(app::Start::Join { addr: addr.clone() });
+        let name = args.get(2).cloned().unwrap_or_else(default_name);
+        app::run(app::Start::Join { addr: addr.clone(), name });
         return;
     }
     // Optional: pass a number to get the same world again, e.g. `cargo run --release -- 42`.
@@ -33,5 +42,5 @@ fn main() {
                 .unwrap_or(1)
         });
     println!("world seed: {seed}");
-    app::run(app::Start::Alone { seed });
+    app::run(app::Start::Alone { seed, name: default_name() });
 }

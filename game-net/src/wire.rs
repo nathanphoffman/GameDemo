@@ -46,13 +46,13 @@ mod tests {
     #[test]
     fn messages_survive_the_trip() {
         let mut bytes = Vec::new();
-        write_message(&mut bytes, &ClientMessage::Hello { version: PROTOCOL_VERSION }).unwrap();
+        write_message(&mut bytes, &ClientMessage::Hello { version: PROTOCOL_VERSION, name: "Ann".into() }).unwrap();
         let input = PlayerInput { forward: true, yaw: 1.5, ..PlayerInput::default() };
         write_message(&mut bytes, &ClientMessage::Command(Command::SetInput(input))).unwrap();
 
         let mut stream = &bytes[..];
         let first: ClientMessage = read_message(&mut stream).unwrap();
-        assert!(matches!(first, ClientMessage::Hello { version } if version == PROTOCOL_VERSION));
+        assert!(matches!(first, ClientMessage::Hello { version, ref name } if version == PROTOCOL_VERSION && name == "Ann"));
         let second: ClientMessage = read_message(&mut stream).unwrap();
         match second {
             ClientMessage::Command(Command::SetInput(got)) => {

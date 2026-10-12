@@ -9,8 +9,9 @@ mod protocol;
 mod server;
 mod wire;
 
-pub use client::{Client, Mirror};
+pub use client::{Client, Mirror, Update};
 pub use protocol::{
-    ClientMessage, ServerMessage, Tick, Welcome, MAX_PLAYERS, PROTOCOL_VERSION, TICK_SECONDS,
+    tidy_chat, tidy_name, ClientMessage, ServerMessage, Tick, Welcome, MAX_CHAT, MAX_NAME,
+    MAX_PLAYERS, PROTOCOL_VERSION, TICK_SECONDS,
 };
 pub use server::Server;

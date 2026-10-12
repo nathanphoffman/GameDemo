@@ -27,13 +27,27 @@ How a game runs:
   movement feels instant. The host refuses impossible jumps. Everything else (mining, placing,
   fighting, applying resources, converting) is decided by the host.
 
+## Names, chat and rejoining
+
+- A player's name comes from `gamedemo join <address:port> [name]` (default: your login name).
+  Two players can't share a name at once (capital letters don't count); the host tidies names to
+  16 characters.
+- **Rejoining**: when a player leaves, the host keeps their resources, converter, health and
+  position under their name (up to 64 people, until the host stops). Coming back with the same
+  name gets those back (and "NAME came back" in the chat). Anyone using a new name starts fresh.
+- **Chat**: press Enter, type, Enter to send (Esc cancels; the game waits while you type). The
+  last few lines show in the lower left for 12 seconds. Lines are capped at 120 characters. The
+  host announces who joined and left. The font only has capitals, digits and a little
+  punctuation; anything else shows as `?`.
+- **Player list**: hold Tab. Other players' names float over their heads (within 48 blocks).
+
 ## Running it
 
 ```
 cargo run --release                              # single player (optionally: -- 42 for a seed)
 cargo run --release -p gamedemo-host -- 7777 42  # host: port, seed (both optional)
-cargo run --release -- join 192.168.1.20:7777    # join a host
-cargo run -p gamedemo-host --bin walker -- 127.0.0.1:7777 20   # window-less test player
+cargo run --release -- join 192.168.1.20:7777 Ann  # join a host (name is optional)
+cargo run -p gamedemo-host --bin walker -- 127.0.0.1:7777 20 BOT  # window-less test player
 cargo test --workspace
 ```
 
@@ -53,6 +67,9 @@ when it stops.
       blocks) and see cracks on the block they are mining.
 - [x] Creatures placed from the seed like terrain, more and tougher in dangerous biomes, and
       respawning after being defeated (about 350 in a world; only the ones near players exist).
+- [x] Names, a player list (Tab), name tags over heads, chat (Enter), and rejoining with the same
+      name to get your things back. Covered by `game-net/tests/sync.rs` and checked in the real
+      window.
 - [x] Weather: the host only tracks which weather it is; each player's game works out how it
       looks there (snow in the cold, dust storms in the desert, blue under water).
 - [x] Play-tested: a scripted session over the network (`game-net/tests/play.rs`: build a floor
@@ -66,17 +83,15 @@ None of these stop it from working; they are roughly in the order worth doing.
 
 1. **Fighting through the real window, and longer play sessions.** The fight is covered by the
    scripted network test, but not by driving the window.
-2. **Rejoining.** A player who drops (or is dropped for not keeping up) comes back as a new
-   player with new resources. Needs some way to identify a returning player and keep their
-   state for a while.
-3. **Names, chat, a player list.** Players can only be told apart by where they are.
-4. **Saving.** Nothing is saved: the world and every player's resources are gone when the host
-   stops. (Single player never saved either.) The block changes already tracked by the world
-   would make saving the world easy; player state would need a file too.
-5. **Single-player memory.** The host and the game each build their own copy of the world, so it
+2. **Saving.** Nothing is saved: the world and every player's resources are gone when the host
+   stops, and so is what the host remembers about players who left (so rejoining only works
+   while the host runs). (Single player never saved either.) The block changes already tracked
+   by the world would make saving the world easy; player state would need a file too, and could
+   be keyed by name like rejoining is.
+3. **Single-player memory.** The host and the game each build their own copy of the world, so it
    uses about twice the memory (they are built at the same time, so start-up isn't doubled).
    Could be fixed by sharing one copy in single player.
-6. **Tuning creatures.** The numbers are guesses until played: creatures per cell by biome
+4. **Tuning creatures.** The numbers are guesses until played: creatures per cell by biome
    (`spawns::creatures_per_cell`), health per kind (`Kind::max_health`), wake distance and the
    5 minute respawn (`spawns.rs`). All creatures hit for the same 2d6, so difficulty is health
    and number only; a per-kind damage bonus would be the next lever.

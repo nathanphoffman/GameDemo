@@ -1,27 +1,31 @@
 //! A bare-bones player with no window: connects to a host and walks around, digging now and
 //! then, and prints what the host tells it. For checking the host works.
 //!
-//! `walker [address] [seconds]`
+//! `walker [address] [seconds] [name]`
 
 use std::time::{Duration, Instant};
 
 use game_core::game::{Command, PlayerInput};
-use game_net::{Client, Mirror};
+use game_net::{Client, Mirror, Update};
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let addr = args.next().unwrap_or_else(|| "127.0.0.1:7777".into());
     let seconds: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(20.0);
 
-    let (mut client, welcome) = Client::connect(&addr).unwrap_or_else(|e| {
+    let name = args.next().unwrap_or_else(|| "WALKER".to_string());
+
+    let (mut client, welcome) = Client::connect(&addr, &name).unwrap_or_else(|e| {
         eprintln!("can't join {addr}: {e}");
         std::process::exit(1);
     });
     println!(
-        "joined as player {}, seed {}, {} changed blocks",
+        "joined as {} (player {}), seed {}, {} changed blocks{}",
+        welcome.name,
         welcome.you.0,
         welcome.seed,
-        welcome.blocks.len()
+        welcome.blocks.len(),
+        if welcome.rejoined { ", welcome back" } else { "" }
     );
     let mut mirror = Mirror::new(&welcome);
 
@@ -43,17 +47,23 @@ fn main() {
         if client.send(Command::SetInput(input)).is_err() {
             break;
         }
-        match client.wait_tick(Duration::from_millis(100)) {
-            Ok(Some(tick)) => {
-                block_changes += tick.blocks.len();
-                mirror.apply(&tick);
+        match client.poll() {
+            Ok(updates) => {
+                for update in &updates {
+                    match update {
+                        Update::Tick(tick) => block_changes += tick.blocks.len(),
+                        Update::Chat { from, text } => println!("chat: {from}: {text}"),
+                        Update::Roster(_) => {}
+                    }
+                    mirror.apply_update(update);
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 eprintln!("lost the host: {e}");
                 break;
             }
         }
+        std::thread::sleep(Duration::from_millis(30));
         if t >= next_report {
             next_report += 1.0;
             if let Some(s) = &mirror.latest {

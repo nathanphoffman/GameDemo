@@ -9,7 +9,7 @@ use game_core::combat::MAX_PLAYER_HP;
 use game_core::game::{Command, Event, PlayerInput};
 use game_core::glam::Vec3;
 use game_core::world::{Block, World};
-use game_net::{Client, Mirror, Server};
+use game_net::{Client, Mirror, Server, Update};
 
 const SEED: u32 = 3;
 const WOOD: usize = 3;
@@ -22,15 +22,17 @@ struct Player {
 }
 
 impl Player {
-    fn join(addr: std::net::SocketAddr) -> Player {
-        let (client, welcome) = Client::connect(addr).unwrap();
+    fn join(addr: std::net::SocketAddr, name: &str) -> Player {
+        let (client, welcome) = Client::connect(addr, name).unwrap();
         Player { client, mirror: Mirror::new(&welcome), events: Vec::new() }
     }
 
     fn pump(&mut self) {
-        for tick in self.client.poll().expect("still connected") {
-            self.mirror.apply(&tick);
-            self.events.extend(tick.events.iter().copied());
+        for update in self.client.poll().expect("still connected") {
+            if let Update::Tick(tick) = &update {
+                self.events.extend(tick.events.iter().copied());
+            }
+            self.mirror.apply_update(&update);
         }
     }
 
@@ -78,8 +80,8 @@ fn a_session_of_building_and_fighting() {
     let stop = server.stop_flag();
     let host = thread::spawn(move || server.run().unwrap());
 
-    let mut a = Player::join(addr);
-    let mut b = Player::join(addr);
+    let mut a = Player::join(addr, "Ann");
+    let mut b = Player::join(addr, "Bob");
     until("both settled", 10, &mut [&mut a, &mut b], |ps| {
         ps.iter().all(|p| p.mirror.latest.as_ref().is_some_and(|s| s.players.len() == 2))
     });

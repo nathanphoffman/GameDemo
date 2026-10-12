@@ -86,6 +86,8 @@ pub struct PlayerInput {
 /// Everything that belongs to one player.
 pub struct PlayerState {
     pub id: PlayerId,
+    /// What they are called. Coming back with the same name gets you your things back.
+    pub name: String,
     pub body: Player,
     pub input: PlayerInput,
     pub resources: Resources,
@@ -106,9 +108,10 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    fn new(id: PlayerId, pos: Vec3) -> Self {
+    fn new(id: PlayerId, name: String, pos: Vec3) -> Self {
         PlayerState {
             id,
+            name,
             body: Player::new(pos),
             input: PlayerInput::default(),
             // A big pile of everything to try things out with. Use `Resources::default()` for
@@ -164,6 +167,8 @@ pub struct Game {
     pub weather: Weather,
     pub fires: Fires,
     players: Vec<PlayerState>,
+    /// Players who left, by name, so that coming back picks up where they were.
+    away: Vec<PlayerState>,
     dice: Dice,
     /// Where creatures live, worked out per area of the world the first time it is needed.
     homes: std::collections::HashMap<(i32, i32), Vec<spawns::Home>>,
@@ -189,6 +194,7 @@ impl Game {
             weather: Weather::new(seed ^ 0x5EA7),
             fires: Fires::default(),
             players: Vec::new(),
+            away: Vec::new(),
             dice: Dice::with_seed(seed ^ 0xD1CE),
             homes: Default::default(),
             defeated: Default::default(),
@@ -203,20 +209,68 @@ impl Game {
         self.seed
     }
 
-    /// A new player, standing at the world's spawn point.
+    /// A new player, standing at the world's spawn point, called "PLAYER" and their number.
     pub fn add_player(&mut self) -> PlayerId {
-        let id = PlayerId(self.next_player_id);
-        self.next_player_id += 1;
-        self.players.push(PlayerState::new(id, self.world.spawn_point()));
-        id
+        let name = format!("PLAYER{}", self.next_player_id);
+        self.join(&name).0
     }
 
+    /// Someone called `name` comes into the game. If a player of that name left earlier, they
+    /// get their resources, health and place back (and the answer is `true`); otherwise they
+    /// are new, at the spawn point. The caller makes sure nobody here has the name.
+    pub fn join(&mut self, name: &str) -> (PlayerId, bool) {
+        let id = PlayerId(self.next_player_id);
+        self.next_player_id += 1;
+        let earlier = self.away.iter().position(|p| p.name.eq_ignore_ascii_case(name));
+        let (state, back) = match earlier {
+            Some(i) => {
+                let mut state = self.away.remove(i);
+                // Their things and where they stood, but not what they were in the middle of.
+                let hp = state.combat.player_hp;
+                state.id = id;
+                state.combat = Combat::new();
+                state.combat.player_hp = hp;
+                state.input = PlayerInput::default();
+                state.body.vel_y = 0.0;
+                state.mine_timer = 0.0;
+                state.round_pause = 0.0;
+                state.pose_from_client = false;
+                state.since_pose = 0.0;
+                state.was_busy = false;
+                (state, true)
+            }
+            None => (PlayerState::new(id, name.to_string(), self.world.spawn_point()), false),
+        };
+        self.players.push(state);
+        (id, back)
+    }
+
+    /// Whether a player here is called `name` (capital letters don't matter).
+    pub fn name_in_use(&self, name: &str) -> bool {
+        self.players.iter().any(|p| p.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The player leaves. Their things are kept in case they come back (`join`).
     pub fn remove_player(&mut self, id: PlayerId) {
-        self.players.retain(|p| p.id != id);
+        // Don't remember an unlimited number of people.
+        const REMEMBERED: usize = 64;
+        if let Some(i) = self.players.iter().position(|p| p.id == id) {
+            let gone = self.players.remove(i);
+            self.away.retain(|p| !p.name.eq_ignore_ascii_case(&gone.name));
+            if self.away.len() >= REMEMBERED {
+                self.away.remove(0);
+            }
+            self.away.push(gone);
+        }
     }
 
     pub fn player(&self, id: PlayerId) -> Option<&PlayerState> {
         self.players.iter().find(|p| p.id == id)
+    }
+
+    #[cfg(test)]
+    fn player_mut_for_test(&mut self, id: PlayerId) -> &mut PlayerState {
+        self.players.iter_mut().find(|p| p.id == id).unwrap()
     }
 
     pub fn players(&self) -> &[PlayerState] {
@@ -442,5 +496,40 @@ mod tests {
         game.apply(me, Command::ApplyAt { kind: 99, pos: (1, 1, 1) });
         game.apply(me, Command::ApplyAt { kind: 0, pos: (i32::MAX, 0, i32::MIN) });
         assert!(!game.can_apply(me, 99, (1, 1, 1)));
+    }
+
+    #[test]
+    fn coming_back_with_the_same_name_gets_your_things_back() {
+        let mut game = Game::new(3);
+        let (first, back) = game.join("Ann");
+        assert!(!back);
+        assert!(game.name_in_use("ann"), "names don't care about capitals");
+        run(&mut game, 1.0);
+        game.apply(first, Command::SetInput(looking_down()));
+        run(&mut game, MINE_INTERVAL + 0.5);
+        let before = game.player(first).unwrap().resources;
+        assert_ne!(before, Resources::test_kit());
+        let spot = game.player(first).unwrap().body.pos;
+        game.player_mut_for_test(first).combat.player_hp = 31;
+
+        game.remove_player(first);
+        assert!(!game.name_in_use("Ann"));
+        // Someone else coming in is new...
+        let (other, other_back) = game.join("Bob");
+        assert!(!other_back);
+        assert_eq!(game.player(other).unwrap().resources, Resources::test_kit());
+        // ...and Ann is herself again, with a new number.
+        let (again, back) = game.join("ANN");
+        assert!(back);
+        assert_ne!(again, first);
+        let ann = game.player(again).unwrap();
+        assert_eq!(ann.resources, before);
+        assert_eq!(ann.combat.player_hp, 31);
+        assert!((ann.body.pos - spot).length() < 1e-3);
+        assert!(!ann.input.mining, "not still holding the button");
+        // Leaving twice doesn't leave two of her behind.
+        game.remove_player(again);
+        game.remove_player(again);
+        assert_eq!(game.away.iter().filter(|p| p.name == "Ann" || p.name == "ANN").count(), 1);
     }
 }

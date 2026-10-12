@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
-/// Room for the crosshair, the rock counter and the dice.
-pub const MAX_HUD_VERTICES: usize = 32768;
+/// Room for the crosshair, the rock counter, the dice, and the chat.
+pub const MAX_HUD_VERTICES: usize = 300_000;
 
 /// Row colors for grey (stone), white (snow), green (grass and leaves), brown (wood) and
 /// black (coal).
@@ -67,8 +67,33 @@ fn glyph(c: char) -> [u8; 5] {
         'P' => [0b110, 0b101, 0b110, 0b100, 0b100],
         '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
         'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+        'J' => [0b001, 0b001, 0b001, 0b101, 0b010],
+        'Q' => [0b010, 0b101, 0b101, 0b111, 0b011],
+        'Z' => [0b111, 0b001, 0b010, 0b100, 0b111],
+        '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
+        ',' => [0b000, 0b000, 0b000, 0b010, 0b100],
+        '!' => [0b010, 0b010, 0b010, 0b000, 0b010],
+        '?' => [0b111, 0b001, 0b011, 0b000, 0b010],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        '_' => [0b000, 0b000, 0b000, 0b000, 0b111],
+        '(' => [0b001, 0b010, 0b010, 0b010, 0b001],
+        ')' => [0b100, 0b010, 0b010, 0b010, 0b100],
+        '\'' => [0b010, 0b010, 0b000, 0b000, 0b000],
+        '>' => [0b100, 0b010, 0b001, 0b010, 0b100],
+        '*' => [0b101, 0b010, 0b111, 0b010, 0b101],
         _ => [0; 5],
     }
+}
+
+/// `text` as the font can show it: capitals only, and `?` for anything it has no letter for.
+pub fn display_text(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let c = c.to_ascii_uppercase();
+            if c == ' ' || glyph(c) != [0; 5] { c } else { '?' }
+        })
+        .collect()
 }
 
 struct Builder {
@@ -283,6 +308,14 @@ pub struct HudInfo<'a> {
     /// (health shown on the bar, actual health, max health). The shown value trails the actual
     /// one after a hit, which paints the draining chunk.
     pub hp: (f32, i32, i32),
+    /// Recent chat lines, oldest first, already in `display_text` form.
+    pub chat: &'a [String],
+    /// The line being typed, if the chat is open.
+    pub chat_input: Option<&'a str>,
+    /// The names of everyone playing, if the list is being shown.
+    pub player_list: Option<&'a [String]>,
+    /// Names to float over other players: the text and where on the screen (pixels).
+    pub name_tags: &'a [(String, f32, f32)],
 }
 
 /// Where a point in the world lands on the screen, in pixels from the top left, or None if
@@ -369,6 +402,10 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         player_roll,
         enemy_rolls,
         hp,
+        chat,
+        chat_input,
+        player_list,
+        name_tags,
     } = *info;
     let (w, h) = (width as f32, height as f32);
     let mut b = Builder {
@@ -587,6 +624,45 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         draw_roll(&mut b, x, rest_y, scale, *roll, &ENEMY_DICE, false);
     }
 
+    // Names over other players' heads.
+    for (name, x, y) in name_tags {
+        b.centered_text(*x, *y, scale, name, [1.0, 1.0, 0.8]);
+    }
+
+    // Lower left: the chat, with the line being typed at the bottom. Lines are cut to fit the
+    // window (the end of what is being typed is the part that matters).
+    let fits = (((w * 0.9 - 2.0 * margin) / (4.0 * scale)) as usize).max(8);
+    let line = 7.0 * scale;
+    let mut bottom = h - margin - 6.0 * scale;
+    if let Some(typing) = chat_input {
+        let skip = (typing.chars().count() + 3).saturating_sub(fits);
+        let shown = format!("> {}_", typing.chars().skip(skip).collect::<String>());
+        b.rect(
+            margin - scale,
+            bottom - scale,
+            w * 0.6,
+            line + scale,
+            [0.05, 0.05, 0.08],
+        );
+        b.text(margin, bottom, scale, &shown, [1.0, 1.0, 1.0]);
+        bottom -= line + 2.0 * scale;
+    }
+    for (i, text) in chat.iter().rev().enumerate() {
+        let text: String = text.chars().take(fits).collect();
+        b.text(margin, bottom - i as f32 * line, scale, &text, [0.9, 0.95, 1.0]);
+    }
+
+    // Top center: who is playing, while the list is held.
+    if let Some(names) = player_list {
+        let rows = names.len() as f32 + 1.0;
+        let half = 45.0 * scale;
+        b.rect(cx - half, margin - scale, half * 2.0, rows * line + 2.0 * scale, [0.06, 0.06, 0.10]);
+        b.centered_text(cx, margin, scale, "PLAYERS", [1.0, 0.8, 0.3]);
+        for (i, name) in names.iter().enumerate() {
+            b.centered_text(cx, margin + (i as f32 + 1.0) * line, scale, name, white);
+        }
+    }
+
     b.verts
 }
 
@@ -596,6 +672,10 @@ mod tests {
 
     #[test]
     fn hud_always_fits_in_the_buffer() {
+        // The most chat that can be on screen at once, in the widest letters.
+        let chat = vec!["W".repeat(200); 8];
+        let names = vec!["WWWWWWWWWWWWWWWW".to_string(); 16];
+        let tags = vec![("WWWWWWWWWWWWWWWW".to_string(), 960.0, 400.0); 16];
         for age in [0.0, 0.3, 0.9, 1.4, 1.5, 1.7, 2.5, 3.0] {
             for roll in [(1, 1, age), (6, 6, age), (3, 5, age)] {
                 let four = [roll; 4];
@@ -612,6 +692,10 @@ mod tests {
                     player_roll: Some(roll),
                     enemy_rolls: &four,
                     hp: (50.0, 50, 50),
+                    chat: &chat,
+                    chat_input: Some("HELLO THERE FRIENDS"),
+                    player_list: Some(&names),
+                    name_tags: &tags,
                 };
                 let v = build(3840, 2160, &info);
                 assert!(v.len() <= MAX_HUD_VERTICES, "{} at age {age}", v.len());
@@ -633,6 +717,10 @@ mod tests {
                 player_roll: None,
                 enemy_rolls: &[],
                 hp: (50.0, 50, 50),
+                chat: &[],
+                chat_input: None,
+                player_list: None,
+                name_tags: &[],
             },
         );
         assert!(quiet.len() < 6000, "{}", quiet.len());
@@ -677,5 +765,15 @@ mod tests {
         let (rx, ry) = project_to_screen(vp, Vec3::new(1.0, 1.0, -5.0), 1920.0, 1080.0).unwrap();
         assert!(rx > 960.0 && ry < 540.0);
         assert!(project_to_screen(vp, Vec3::new(0.0, 0.0, 5.0), 1920.0, 1080.0).is_none());
+    }
+
+    #[test]
+    fn chat_text_is_made_showable() {
+        assert_eq!(display_text("Hello, world! 42"), "HELLO, WORLD! 42");
+        assert_eq!(display_text("a#b\u{e9}"), "A?B?");
+        // Every letter and digit has a glyph.
+        for c in ('A'..='Z').chain('0'..='9') {
+            assert_ne!(glyph(c), [0; 5], "{c}");
+        }
     }
 }

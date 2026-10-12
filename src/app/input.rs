@@ -12,6 +12,10 @@ impl App {
     /// Left button pressed or released: picks from the menu, picks the converter's
     /// resource (with Ctrl), or starts and stops mining and attacking.
     pub(crate) fn left_click(&mut self, pressed: bool) {
+        if self.chat_input.is_some() {
+            self.set_mining(false);
+            return;
+        }
         if self.menu.is_some() {
             self.set_mining(false);
             if pressed {
@@ -42,7 +46,29 @@ impl App {
 
     /// A key went down or up. Esc backs out of the menu first, and only then quits.
     pub(crate) fn key_changed(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, down: bool) {
+        // While typing a chat line every key goes to the line, not to the game.
+        if self.chat_input.is_some() {
+            if down {
+                match code {
+                    KeyCode::Enter | KeyCode::NumpadEnter => self.finish_chat(true),
+                    KeyCode::Escape => self.finish_chat(false),
+                    _ => {}
+                }
+            }
+            return;
+        }
         match code {
+            KeyCode::Tab => self.show_players = down,
+            KeyCode::Enter | KeyCode::NumpadEnter if down && self.menu.is_none() => {
+                // Let go of everything held, so nothing keeps going while typing.
+                self.input = PlayerInput {
+                    yaw: self.input.yaw,
+                    pitch: self.input.pitch,
+                    ..PlayerInput::default()
+                };
+                self.set_mining(false);
+                self.chat_input = Some(String::new());
+            }
             KeyCode::KeyW => self.input.forward = down,
             KeyCode::KeyA => self.input.left = down,
             KeyCode::KeyS => self.input.back = down,
@@ -182,6 +208,18 @@ impl ApplicationHandler for App {
                 let down = event.state == ElementState::Pressed;
                 if let PhysicalKey::Code(code) = event.physical_key {
                     self.key_changed(event_loop, code, down);
+                }
+                // The letters of a chat line (not the keys: shift, layouts and so on).
+                if down && let Some(line) = &mut self.chat_input {
+                    if event.physical_key == PhysicalKey::Code(KeyCode::Backspace) {
+                        line.pop();
+                    } else if let Some(text) = &event.text {
+                        for c in text.chars().filter(|c| !c.is_control()) {
+                            if line.chars().count() < game_net::MAX_CHAT {
+                                line.push(c);
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),

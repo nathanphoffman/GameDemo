@@ -24,7 +24,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 use std::sync::Arc;
 
-use game_net::{Client, Mirror, Server};
+use game_net::{Client, Mirror, Server, Update};
 
 use crate::combat::MAX_PLAYER_HP;
 use crate::effects::{self, Effect};
@@ -51,9 +51,9 @@ const POSE_INTERVAL: f32 = 1.0 / 60.0;
 /// How to start.
 pub(crate) enum Start {
     /// Play alone, on a host that runs inside this program.
-    Alone { seed: u32 },
+    Alone { seed: u32, name: String },
     /// Join a host at this address.
-    Join { addr: String },
+    Join { addr: String, name: String },
 }
 
 /// Where everyone is right now, smoothed between the host's updates.
@@ -103,6 +103,12 @@ pub(crate) struct App {
     cursor_locked: bool,
     /// The host went away; the window closes.
     connection_lost: bool,
+    /// Chat lines (already in showable form) and when they arrived.
+    chat_log: Vec<(Instant, String)>,
+    /// The line being typed, while the chat is open.
+    chat_input: Option<String>,
+    /// Tab is held: show who is playing.
+    show_players: bool,
     music: Option<music::Music>,
 }
 
@@ -140,6 +146,9 @@ impl App {
             focused: true,
             cursor_locked: false,
             connection_lost: false,
+            chat_log: Vec::new(),
+            chat_input: None,
+            show_players: false,
             music: music::Music::start(),
         };
         app.refresh_scene();
@@ -154,46 +163,88 @@ impl App {
     /// Takes in whatever the host has sent: the world changes, the new picture of everyone, and
     /// what happened (for sounds).
     fn receive(&mut self) {
-        let ticks = match self.net.poll() {
-            Ok(ticks) => ticks,
+        let updates = match self.net.poll() {
+            Ok(updates) => updates,
             Err(e) => {
                 eprintln!("lost the connection to the host: {e}");
                 self.connection_lost = true;
                 return;
             }
         };
-        if ticks.is_empty() {
-            return;
-        }
-        self.update_at = Instant::now();
-        for tick in &ticks {
-            self.mirror.apply(tick);
-            for event in &tick.events {
-                match *event {
-                    Event::Dug { player, block, ice, pos } => {
-                        // Your own digging is at full volume; other players' gets quieter
-                        // with distance and can't be heard from far off.
-                        let volume = if player == self.me {
-                            1.0
-                        } else {
-                            let center = Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
-                            let fade = 1.0 - center.distance(self.body.pos) / HEARING_RANGE;
-                            fade * fade
-                        };
-                        if volume > 0.02
-                            && let Some(music) = &self.music
-                        {
-                            music.dig_at(block, ice, volume);
-                        }
-                    }
-                    Event::RoundSkipped { player } if player == self.me => {
-                        // The health bar jumps to its final value instead of draining.
-                        self.hp_shown = tick.snapshot.you.hp as f32;
-                    }
-                    _ => {}
+        for update in &updates {
+            self.mirror.apply_update(update);
+            match update {
+                Update::Tick(tick) => self.take_in(tick),
+                Update::Chat { from, text } => {
+                    let line = if from.is_empty() {
+                        format!("* {text}")
+                    } else {
+                        format!("{from}: {text}")
+                    };
+                    self.chat_log.push((Instant::now(), hud::display_text(&line)));
+                    // Keep the log short: only the last few lines are ever shown.
+                    let extra = self.chat_log.len().saturating_sub(40);
+                    self.chat_log.drain(..extra);
                 }
+                Update::Roster(_) => {}
             }
         }
+    }
+
+    /// One update of the game from the host: the sounds and effects of what happened.
+    fn take_in(&mut self, tick: &game_net::Tick) {
+        self.update_at = Instant::now();
+        for event in &tick.events {
+            match *event {
+                Event::Dug { player, block, ice, pos } => {
+                    // Your own digging is at full volume; other players' gets quieter with
+                    // distance and can't be heard from far off.
+                    let volume = if player == self.me {
+                        1.0
+                    } else {
+                        let center =
+                            Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                        let fade = 1.0 - center.distance(self.body.pos) / HEARING_RANGE;
+                        fade * fade
+                    };
+                    if volume > 0.02
+                        && let Some(music) = &self.music
+                    {
+                        music.dig_at(block, ice, volume);
+                    }
+                }
+                Event::RoundSkipped { player } if player == self.me => {
+                    // The health bar jumps to its final value instead of draining.
+                    self.hp_shown = tick.snapshot.you.hp as f32;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Says what has been typed (if anything) and closes the chat.
+    pub(crate) fn finish_chat(&mut self, send: bool) {
+        if let Some(text) = self.chat_input.take()
+            && send
+            && !text.trim().is_empty()
+            && self.net.say(&text).is_err()
+        {
+            self.connection_lost = true;
+        }
+    }
+
+    /// The chat lines to show: the recent ones, or the last few while typing.
+    fn visible_chat(&self) -> Vec<String> {
+        const SHOWN: usize = 8;
+        const SECONDS: f32 = 12.0;
+        let typing = self.chat_input.is_some();
+        let recent: Vec<&(Instant, String)> = self
+            .chat_log
+            .iter()
+            .filter(|(at, _)| typing || at.elapsed().as_secs_f32() < SECONDS)
+            .collect();
+        let skip = recent.len().saturating_sub(SHOWN);
+        recent[skip..].iter().map(|(_, text)| text.clone()).collect()
     }
 
     /// Works out where everyone is drawn: between the last two updates, so it is smooth.
@@ -313,9 +364,10 @@ impl App {
                 .is_some_and(|e| self.you().resources.dense[kind] >= e.dense_cost())
     }
 
-    /// True while the mouse is pointing at the HUD (Ctrl held, or the apply menu open).
+    /// True while the mouse is pointing at the HUD (Ctrl held, or the apply menu open), or a
+    /// chat line is being typed (the game waits).
     pub(crate) fn ui_open(&self) -> bool {
-        self.keys.ctrl || self.menu.is_some()
+        self.keys.ctrl || self.menu.is_some() || self.chat_input.is_some()
     }
 
     /// Takes the mouse: hidden, and locked (or, where locking isn't available, confined to
@@ -346,7 +398,7 @@ impl App {
 /// Connects to a host (starting one first when playing alone) and waits for the first update.
 fn connect(start: Start) -> Result<(Client, Mirror), String> {
     let (client, mirror) = match start {
-        Start::Alone { seed } => {
+        Start::Alone { seed, name } => {
             let server = Server::bind("127.0.0.1:0", seed)
                 .map_err(|e| format!("can't start the game: {e}"))?
                 .quiet();
@@ -359,10 +411,10 @@ fn connect(start: Start) -> Result<(Client, Mirror), String> {
             // The host is making its world; make ours at the same time.
             let world = World::generate(seed);
             let (client, welcome) =
-                Client::connect(addr).map_err(|e| format!("can't start the game: {e}"))?;
+                Client::connect(addr, &name).map_err(|e| format!("can't start the game: {e}"))?;
             (client, Mirror::with_world(&welcome, world))
         }
-        Start::Join { addr } => {
+        Start::Join { addr, name } => {
             let target = addr
                 .to_socket_addrs()
                 .map_err(|e| format!("bad address {addr}: {e}"))?
@@ -370,8 +422,13 @@ fn connect(start: Start) -> Result<(Client, Mirror), String> {
                 .ok_or_else(|| format!("no such address: {addr}"))?;
             println!("joining {target} ...");
             let (client, welcome) =
-                Client::connect(target).map_err(|e| format!("can't join {addr}: {e}"))?;
-            println!("joined, building the world (seed {}) ...", welcome.seed);
+                Client::connect(target, &name).map_err(|e| format!("can't join {addr}: {e}"))?;
+            println!(
+                "joined as {}{}, building the world (seed {}) ...",
+                welcome.name,
+                if welcome.rejoined { " (welcome back)" } else { "" },
+                welcome.seed
+            );
             (client, Mirror::new(&welcome))
         }
     };
