@@ -14,7 +14,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -592,11 +592,40 @@ struct App {
     /// Health shown on the bar; trails the real value after a hit so the loss is visible.
     hp_shown: f32,
     round_pause: f32,
+    /// The window has keyboard focus (and so should own the mouse).
+    focused: bool,
+    /// The OS really locked the pointer. If not, it is only confined, and the game keeps
+    /// pulling it back to the middle of the window so it can't wander onto another monitor.
+    cursor_locked: bool,
     was_busy: bool,
     _music: Option<music::Music>,
 }
 
 impl App {
+    /// Takes the mouse: hidden, and locked (or, where locking isn't available, confined to
+    /// the window). Safe to call again; it is repeated on focus and click in case the first
+    /// attempt didn't take or the grab was lost.
+    fn grab_cursor(&mut self) {
+        let Some(gfx) = &self.gfx else {
+            return;
+        };
+        let window = &gfx.window;
+        let locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+        if !locked {
+            let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+        }
+        window.set_cursor_visible(false);
+        self.cursor_locked = locked;
+    }
+
+    /// Gives the mouse back, for when the window isn't the one being played in.
+    fn release_cursor(&self) {
+        if let Some(gfx) = &self.gfx {
+            let _ = gfx.window.set_cursor_grab(CursorGrabMode::None);
+            gfx.window.set_cursor_visible(true);
+        }
+    }
+
     /// The block under the crosshair within reach, unless an enemy is what you're looking at.
     fn block_in_sights(&self) -> Option<(i32, i32, i32)> {
         self.block_hit_in_sights().map(|hit| hit.block)
@@ -809,12 +838,9 @@ impl ApplicationHandler for App {
                 )
                 .unwrap(),
         );
-        let _ = window
-            .set_cursor_grab(CursorGrabMode::Locked)
-            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
-        window.set_cursor_visible(false);
         let (vertices, indices) = self.world.build_mesh();
         self.gfx = Some(Gfx::new(window, &vertices, &indices));
+        self.grab_cursor();
         self.last_frame = Instant::now();
     }
 
@@ -835,12 +861,26 @@ impl ApplicationHandler for App {
                     gfx.resize(size);
                 }
             }
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if focused {
+                    self.grab_cursor();
+                } else {
+                    // Let go of everything so nothing stays "held" while we're away.
+                    self.keys = Keys::default();
+                    self.release_cursor();
+                }
+            }
             WindowEvent::MouseInput {
                 button: MouseButton::Left,
                 state,
                 ..
             } => {
                 self.keys.mining = state == ElementState::Pressed;
+                if state == ElementState::Pressed && self.focused {
+                    // A click is a good moment to retake the mouse if we somehow lost it.
+                    self.grab_cursor();
+                }
                 // Every click is an attack, if the enemy is what the crosshair is on.
                 if state == ElementState::Pressed {
                     self.attack();
@@ -947,6 +987,18 @@ impl ApplicationHandler for App {
                     .flat_map(|e| e.mesh(e.facing(look_at)))
                     .collect();
 
+                // Without a real pointer lock, keep the pointer parked in the middle of the
+                // window. Looking around uses raw mouse motion, which this doesn't disturb.
+                if self.focused && !self.cursor_locked {
+                    if let Some(gfx) = &self.gfx {
+                        let size = gfx.window.inner_size();
+                        let _ = gfx.window.set_cursor_position(PhysicalPosition::new(
+                            size.width / 2,
+                            size.height / 2,
+                        ));
+                    }
+                }
+
                 if let Some(gfx) = &mut self.gfx {
                     gfx.set_outline(outline);
                     gfx.set_crack(crack);
@@ -1010,6 +1062,8 @@ fn main() {
         combat: Combat::new(),
         hp_shown: MAX_PLAYER_HP as f32,
         round_pause: 0.0,
+        focused: true,
+        cursor_locked: false,
         was_busy: false,
         _music: music::Music::start(),
     };
