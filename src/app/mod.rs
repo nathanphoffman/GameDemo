@@ -78,6 +78,10 @@ pub(crate) struct App {
     /// Health shown on the bar; trails the real value after a hit so the loss is visible.
     hp_shown: f32,
     round_pause: f32,
+    /// Seconds until the next try at spawning a creature near the player.
+    spawn_timer: f32,
+    spawn_dice: Dice,
+    next_enemy_id: u32,
     /// The window has keyboard focus (and so should own the mouse).
     focused: bool,
     /// The OS really locked the pointer. If not, it is only confined, and the game keeps
@@ -91,12 +95,9 @@ impl App {
     fn new(seed: u32) -> Self {
         let world = World::generate(seed);
         let player = Player::new(world.spawn_point());
-        // A skeleton straight ahead of the spawn point, and a deer off to the west (the grass).
+        // A deer close to the spawn point; the rest of the creatures turn up as you explore.
         let (cx, cz) = (world::SIZE_X as i32 / 2, world::SIZE_Z as i32 / 2);
-        let enemies = vec![
-            Enemy::new(1, Kind::Skeleton, world.open_spot(cx, cz - 7)),
-            Enemy::new(2, Kind::Deer, world.open_spot(cx - 9, cz - 3)),
-        ];
+        let enemies = vec![Enemy::new(1, Kind::Deer, world.open_spot(cx - 9, cz - 3))];
         App {
             gfx: None,
             world,
@@ -119,6 +120,9 @@ impl App {
             combat: Combat::new(),
             hp_shown: MAX_PLAYER_HP as f32,
             round_pause: 0.0,
+            spawn_timer: 3.0,
+            spawn_dice: Dice::new(),
+            next_enemy_id: 2,
             focused: true,
             cursor_locked: false,
             was_busy: false,

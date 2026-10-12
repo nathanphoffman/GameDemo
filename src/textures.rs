@@ -1,7 +1,7 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 44; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 56; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
@@ -10,7 +10,9 @@ pub const LAYERS: u32 = 44; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 
                             // 22 fire, 23 coal, 24 water,
                             // 25 wood floor, 26 stone floor, 27 forge, 28 flower pot, 29 furnace, 30 potting soil,
                             // 31 plant leaves, 32 rain, 33 wind, 34 ice, 35 sand, 36 red rock, 37 clay, 38 basalt,
-                            // 39 magma, 40 cactus, 41 meadow grass top, 42 swamp grass top, 43 mud
+                            // 39 magma, 40 cactus, 41 meadow grass top, 42 swamp grass top, 43 mud,
+                            // 44-55 creatures: wolf, wolf face, boar, boar face, zombie, zombie face,
+                            // scorpion, scorpion face, golem, golem face, yeti, yeti face
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -66,6 +68,19 @@ fn cracks(branches: u32, length: u32, seed: u32) -> Vec<u8> {
         data.extend_from_slice(if lit { &[18, 16, 16, 255] } else { &[0, 0, 0, 0] });
     }
     data
+}
+
+/// A creature's face: skin with two eyes, and a patch (nose, mouth or snout) below them.
+fn face_tile(x: u32, y: u32, skin: [f32; 3], eye: [u8; 4], patch: [u8; 4], seed: u32) -> [u8; 4] {
+    let eyes = ((3..6).contains(&x) || (10..13).contains(&x)) && (5..7).contains(&y);
+    let mouth = (5..11).contains(&x) && (9..13).contains(&y);
+    if eyes {
+        eye
+    } else if mouth {
+        patch
+    } else {
+        shaded(skin, x, y, seed)
+    }
 }
 
 fn tile(layer: u32) -> Vec<u8> {
@@ -253,6 +268,25 @@ fn tile(layer: u32) -> Vec<u8> {
                 // Swamp grass and mud: dark and wet.
                 42 => shaded([66.0, 92.0, 48.0], x, y, 100),
                 43 => shaded([84.0, 70.0, 52.0], x, y, 101),
+                // Creatures: a skin, and a face that is the same skin with eyes and so on.
+                44 => shaded([118.0, 118.0, 126.0], x, y, 110),
+                45 => face_tile(x, y, [118.0, 118.0, 126.0], [240, 200, 40, 255], [34, 30, 32, 255], 111),
+                46 => shaded([112.0, 78.0, 54.0], x, y, 112),
+                47 => face_tile(x, y, [112.0, 78.0, 54.0], [20, 16, 14, 255], [226, 150, 150, 255], 113),
+                48 => shaded([82.0, 128.0, 76.0], x, y, 114),
+                49 => face_tile(x, y, [82.0, 128.0, 76.0], [220, 40, 30, 255], [30, 40, 28, 255], 115),
+                50 => {
+                    let band = y % 5 == 0;
+                    shaded(if band { [120.0, 90.0, 50.0] } else { [190.0, 152.0, 86.0] }, x, y, 116)
+                }
+                51 => face_tile(x, y, [190.0, 152.0, 86.0], [16, 12, 10, 255], [120, 90, 50, 255], 117),
+                52 => {
+                    let fleck = hash(x, y, 118) > 0.86;
+                    shaded(if fleck { [190.0, 120.0, 90.0] } else { [136.0, 70.0, 54.0] }, x, y, 119)
+                }
+                53 => face_tile(x, y, [136.0, 70.0, 54.0], [255, 170, 40, 255], [80, 40, 30, 255], 120),
+                54 => shaded([232.0, 238.0, 246.0], x, y, 121),
+                55 => face_tile(x, y, [232.0, 238.0, 246.0], [20, 24, 40, 255], [90, 110, 150, 255], 122),
                 // Wooden floor: horizontal planks with dark seams.
                 25 => {
                     let plank = y / 4;

@@ -111,9 +111,47 @@ impl App {
         self.enemies.retain(|e| e.health > 0);
     }
 
+    /// Keeps a few creatures around the player: every few seconds one may appear a little way
+    /// off, and be the kind that lives in that spot's biome. Ones left far behind are removed.
+    fn update_spawns(&mut self, dt: f32) {
+        const MAX_NEARBY: usize = 6;
+        const PER_KIND: usize = 3;
+        const MIN_DISTANCE: f32 = 25.0;
+        const MAX_DISTANCE: f32 = 45.0;
+        const DESPAWN_DISTANCE: f32 = 90.0;
+
+        let player = self.player.pos;
+        let flat = |p: Vec3| Vec3::new(p.x - player.x, 0.0, p.z - player.z).length();
+        self.enemies.retain(|e| flat(e.pos()) <= DESPAWN_DISTANCE);
+
+        self.spawn_timer -= dt;
+        if self.spawn_timer > 0.0 {
+            return;
+        }
+        self.spawn_timer = 3.0;
+        if self.enemies.len() >= MAX_NEARBY {
+            return;
+        }
+        let angle = self.spawn_dice.unit() * std::f32::consts::TAU;
+        let distance = MIN_DISTANCE + self.spawn_dice.unit() * (MAX_DISTANCE - MIN_DISTANCE);
+        let (x, z) = (
+            (player.x + angle.cos() * distance).floor() as i32,
+            (player.z + angle.sin() * distance).floor() as i32,
+        );
+        let kind = Kind::for_biome(self.world.biome(x, z));
+        if self.enemies.iter().filter(|e| e.kind == kind).count() >= PER_KIND {
+            return;
+        }
+        if let Some(spot) = self.world.standing_spot(x, z) {
+            self.enemies.push(Enemy::new(self.next_enemy_id, kind, spot));
+            self.next_enemy_id += 1;
+        }
+    }
+
     /// One frame of enemy behavior: hostile ones chase the player, and once any of them is
     /// close enough (and the pause after the last round is over) a round begins.
     pub(crate) fn update_enemies(&mut self, dt: f32) {
+        self.update_spawns(dt);
         let player_alive = self.combat.player_hp > 0;
         let target = self.player.pos;
         for enemy in &mut self.enemies {

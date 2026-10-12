@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::Vec3;
 
+use crate::biome::Biome;
 use crate::player::Player;
 use crate::world::{Vertex, World, FACES};
 
@@ -11,6 +12,18 @@ const SKULL: f32 = 14.0;
 const RIBS: f32 = 15.0;
 const FUR: f32 = 18.0;
 const DEER_FACE: f32 = 19.0;
+const WOLF: f32 = 44.0;
+const WOLF_FACE: f32 = 45.0;
+const BOAR: f32 = 46.0;
+const BOAR_FACE: f32 = 47.0;
+const ZOMBIE: f32 = 48.0;
+const ZOMBIE_FACE: f32 = 49.0;
+const SCORPION: f32 = 50.0;
+const SCORPION_FACE: f32 = 51.0;
+const GOLEM: f32 = 52.0;
+const GOLEM_FACE: f32 = 53.0;
+const YETI: f32 = 54.0;
+const YETI_FACE: f32 = 55.0;
 const BAR_BACK: f32 = 12.0; // near-black border
 const BAR_LOST: f32 = 16.0; // red
 const BAR_HEALTH: f32 = 17.0; // green
@@ -40,42 +53,102 @@ pub const MAX_VERTICES_PER_ENEMY: usize = MAX_PARTS * 6 * 4 + 3 * 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
-    /// Hostile from the start.
-    Skeleton,
-    /// Peaceful until attacked, then hostile.
+    /// Plains. Peaceful until attacked, then hostile.
     Deer,
+    /// Forest. Fast and hostile.
+    Wolf,
+    /// Meadow. Peaceful until attacked, then hostile.
+    Boar,
+    /// Swamp. Slow, tough and hostile.
+    BogZombie,
+    /// Desert. Low and quick, hostile.
+    Scorpion,
+    /// Badlands. Very slow and very tough, hostile.
+    Golem,
+    /// Volcanic country. Hostile.
+    Skeleton,
+    /// Snow. Big and hostile.
+    Yeti,
 }
 
 impl Kind {
+    #[cfg(test)]
+    pub const ALL: [Kind; 8] = [
+        Kind::Deer,
+        Kind::Wolf,
+        Kind::Boar,
+        Kind::BogZombie,
+        Kind::Scorpion,
+        Kind::Golem,
+        Kind::Skeleton,
+        Kind::Yeti,
+    ];
+
+    /// The one creature that lives in each biome.
+    pub fn for_biome(biome: Biome) -> Kind {
+        match biome {
+            Biome::Plains => Kind::Deer,
+            Biome::Forest => Kind::Wolf,
+            Biome::Meadow => Kind::Boar,
+            Biome::Swamp => Kind::BogZombie,
+            Biome::Desert => Kind::Scorpion,
+            Biome::Badlands => Kind::Golem,
+            Biome::Volcanic => Kind::Skeleton,
+            Biome::Snow => Kind::Yeti,
+        }
+    }
+
     pub fn max_health(self) -> i32 {
         match self {
-            Kind::Skeleton => 12,
             Kind::Deer => 8,
+            Kind::Wolf => 9,
+            Kind::Boar => 10,
+            Kind::BogZombie => 16,
+            Kind::Scorpion => 7,
+            Kind::Golem => 22,
+            Kind::Skeleton => 12,
+            Kind::Yeti => 18,
         }
     }
 
     /// Blocks per second when chasing or walking home. Well under the player's walk (5).
     fn chase_speed(self) -> f32 {
         match self {
-            Kind::Skeleton => 2.0,
             Kind::Deer => 3.0,
+            Kind::Wolf => 3.6,
+            Kind::Boar => 2.4,
+            Kind::BogZombie => 1.4,
+            Kind::Scorpion => 3.0,
+            Kind::Golem => 1.0,
+            Kind::Skeleton => 2.0,
+            Kind::Yeti => 1.8,
         }
     }
 
     /// Half the width of the box used for aiming and the wireframe highlight.
     fn half_width(self) -> f32 {
         match self {
-            Kind::Skeleton => 0.4,
-            Kind::Deer => 0.55,
+            Kind::Skeleton | Kind::BogZombie => 0.4,
+            Kind::Wolf => 0.45,
+            Kind::Boar => 0.5,
+            Kind::Deer | Kind::Yeti => 0.55,
+            Kind::Scorpion | Kind::Golem => 0.6,
         }
     }
 
     fn height(self) -> f32 {
-        2.0
+        match self {
+            Kind::Skeleton | Kind::BogZombie | Kind::Deer => 2.0,
+            Kind::Wolf => 1.1,
+            Kind::Boar => 1.0,
+            Kind::Scorpion => 1.2,
+            Kind::Golem => 2.3,
+            Kind::Yeti => 2.25,
+        }
     }
 
     pub fn starts_hostile(self) -> bool {
-        self == Kind::Skeleton
+        !matches!(self, Kind::Deer | Kind::Boar)
     }
 }
 
@@ -156,6 +229,100 @@ fn parts(kind: Kind) -> Vec<Part> {
             // Antlers.
             part([0.07, 1.68, 0.42], [0.12, 1.98, 0.5], [BONE; 6]),
             part([-0.12, 1.68, 0.42], [-0.07, 1.98, 0.5], [BONE; 6]),
+        ],
+        Kind::Wolf => vec![
+            // Body, with the head end at +Z.
+            part([-0.2, 0.45, -0.5], [0.2, 0.85, 0.5], [WOLF; 6]),
+            // Legs.
+            part([0.06, 0.0, 0.3], [0.18, 0.45, 0.42], [WOLF; 6]),
+            part([-0.18, 0.0, 0.3], [-0.06, 0.45, 0.42], [WOLF; 6]),
+            part([0.06, 0.0, -0.42], [0.18, 0.45, -0.3], [WOLF; 6]),
+            part([-0.18, 0.0, -0.42], [-0.06, 0.45, -0.3], [WOLF; 6]),
+            // Head, with the face on the front, ears and a tail.
+            part(
+                [-0.17, 0.62, 0.45],
+                [0.17, 1.0, 0.85],
+                [WOLF, WOLF, WOLF, WOLF, WOLF_FACE, WOLF],
+            ),
+            part([0.06, 1.0, 0.5], [0.15, 1.12, 0.6], [WOLF; 6]),
+            part([-0.15, 1.0, 0.5], [-0.06, 1.12, 0.6], [WOLF; 6]),
+            part([-0.05, 0.7, -0.8], [0.05, 0.82, -0.5], [WOLF; 6]),
+        ],
+        Kind::Boar => vec![
+            part([-0.35, 0.35, -0.55], [0.35, 0.95, 0.55], [BOAR; 6]),
+            // Legs.
+            part([0.12, 0.0, 0.3], [0.3, 0.35, 0.48], [BOAR; 6]),
+            part([-0.3, 0.0, 0.3], [-0.12, 0.35, 0.48], [BOAR; 6]),
+            part([0.12, 0.0, -0.48], [0.3, 0.35, -0.3], [BOAR; 6]),
+            part([-0.3, 0.0, -0.48], [-0.12, 0.35, -0.3], [BOAR; 6]),
+            // Head with a snout on the front, and two tusks.
+            part(
+                [-0.28, 0.45, 0.5],
+                [0.28, 0.95, 0.95],
+                [BOAR, BOAR, BOAR, BOAR, BOAR_FACE, BOAR],
+            ),
+            part([0.18, 0.4, 0.88], [0.24, 0.55, 0.96], [BONE; 6]),
+            part([-0.24, 0.4, 0.88], [-0.18, 0.55, 0.96], [BONE; 6]),
+        ],
+        Kind::BogZombie => vec![
+            part(
+                [-0.25, 1.5, -0.25],
+                [0.25, 2.0, 0.25],
+                [ZOMBIE, ZOMBIE, ZOMBIE, ZOMBIE, ZOMBIE_FACE, ZOMBIE],
+            ),
+            part([-0.25, 0.75, -0.15], [0.25, 1.5, 0.15], [ZOMBIE; 6]),
+            // Arms held out in front.
+            part([0.25, 1.15, 0.0], [0.4, 1.4, 0.8], [ZOMBIE; 6]),
+            part([-0.4, 1.15, 0.0], [-0.25, 1.4, 0.8], [ZOMBIE; 6]),
+            // Legs.
+            part([0.02, 0.0, -0.1], [0.24, 0.75, 0.1], [ZOMBIE; 6]),
+            part([-0.24, 0.0, -0.1], [-0.02, 0.75, 0.1], [ZOMBIE; 6]),
+        ],
+        Kind::Scorpion => vec![
+            // Body with the eyes on the front.
+            part(
+                [-0.4, 0.2, -0.5],
+                [0.4, 0.6, 0.5],
+                [SCORPION, SCORPION, SCORPION, SCORPION, SCORPION_FACE, SCORPION],
+            ),
+            // Legs.
+            part([0.4, 0.0, 0.2], [0.6, 0.2, 0.3], [SCORPION; 6]),
+            part([-0.6, 0.0, 0.2], [-0.4, 0.2, 0.3], [SCORPION; 6]),
+            part([0.4, 0.0, -0.3], [0.6, 0.2, -0.2], [SCORPION; 6]),
+            part([-0.6, 0.0, -0.3], [-0.4, 0.2, -0.2], [SCORPION; 6]),
+            // Claws.
+            part([0.25, 0.25, 0.5], [0.55, 0.5, 0.95], [SCORPION; 6]),
+            part([-0.55, 0.25, 0.5], [-0.25, 0.5, 0.95], [SCORPION; 6]),
+            // Tail curling up over the back.
+            part([-0.1, 0.4, -0.9], [0.1, 0.6, -0.5], [SCORPION; 6]),
+            part([-0.1, 0.6, -1.0], [0.1, 0.95, -0.8], [SCORPION; 6]),
+            part([-0.07, 0.95, -0.9], [0.07, 1.15, -0.6], [BONE; 6]),
+        ],
+        Kind::Golem => vec![
+            part([-0.5, 0.9, -0.3], [0.5, 1.9, 0.3], [GOLEM; 6]),
+            part(
+                [-0.25, 1.9, -0.25],
+                [0.25, 2.3, 0.25],
+                [GOLEM, GOLEM, GOLEM, GOLEM, GOLEM_FACE, GOLEM],
+            ),
+            // Heavy arms and legs.
+            part([0.5, 0.7, -0.2], [0.8, 1.9, 0.2], [GOLEM; 6]),
+            part([-0.8, 0.7, -0.2], [-0.5, 1.9, 0.2], [GOLEM; 6]),
+            part([0.05, 0.0, -0.2], [0.4, 0.9, 0.2], [GOLEM; 6]),
+            part([-0.4, 0.0, -0.2], [-0.05, 0.9, 0.2], [GOLEM; 6]),
+        ],
+        Kind::Yeti => vec![
+            part([-0.45, 0.8, -0.3], [0.45, 1.7, 0.3], [YETI; 6]),
+            part(
+                [-0.3, 1.7, -0.3],
+                [0.3, 2.25, 0.3],
+                [YETI, YETI, YETI, YETI, YETI_FACE, YETI],
+            ),
+            // Long arms and thick legs.
+            part([0.45, 0.6, -0.15], [0.7, 1.6, 0.15], [YETI; 6]),
+            part([-0.7, 0.6, -0.15], [-0.45, 1.6, 0.15], [YETI; 6]),
+            part([0.05, 0.0, -0.2], [0.4, 0.8, 0.2], [YETI; 6]),
+            part([-0.4, 0.0, -0.2], [-0.05, 0.8, 0.2], [YETI; 6]),
         ],
     }
 }
@@ -408,6 +575,11 @@ impl Dice {
         x
     }
 
+    /// A number from 0 up to (not including) 1.
+    pub fn unit(&mut self) -> f32 {
+        (self.next() >> 8) as f32 / (1u32 << 24) as f32
+    }
+
     pub fn d6(&mut self) -> u32 {
         // Use the high bits; they are better mixed than the low ones.
         (self.next() >> 8) % 6 + 1
@@ -447,7 +619,7 @@ mod tests {
 
     #[test]
     fn every_kind_fits_in_the_buffers() {
-        for kind in [Kind::Skeleton, Kind::Deer] {
+        for kind in Kind::ALL {
             let e = Enemy::new(1, kind, Vec3::new(10.0, 5.0, 10.0));
             let v = e.mesh(Vec3::ZERO);
             assert!(v.len() <= MAX_VERTICES_PER_ENEMY, "{kind:?}");
@@ -457,14 +629,28 @@ mod tests {
     }
 
     #[test]
-    fn only_skeletons_start_hostile() {
-        assert!(Enemy::new(1, Kind::Skeleton, Vec3::ZERO).hostile);
-        assert!(!Enemy::new(2, Kind::Deer, Vec3::ZERO).hostile);
+    fn only_the_deer_and_the_boar_start_peaceful() {
+        for kind in Kind::ALL {
+            let peaceful = matches!(kind, Kind::Deer | Kind::Boar);
+            assert_eq!(Enemy::new(1, kind, Vec3::ZERO).hostile, !peaceful, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_biome_has_its_own_creature() {
+        let mut seen = Vec::new();
+        for biome in Biome::ALL {
+            let kind = Kind::for_biome(biome);
+            assert!(!seen.contains(&kind), "{kind:?} is in two biomes");
+            seen.push(kind);
+        }
+        assert_eq!(seen.len(), Kind::ALL.len());
+        assert_eq!(Kind::for_biome(Biome::Plains), Kind::Deer, "hills are not spooky");
     }
 
     #[test]
     fn health_bar_shrinks_with_health() {
-        for kind in [Kind::Skeleton, Kind::Deer] {
+        for kind in Kind::ALL {
             let mut e = Enemy::new(1, kind, Vec3::new(10.0, 5.0, 10.0));
             let width = |e: &Enemy| {
                 // The green quad is the last four vertices.
@@ -475,7 +661,8 @@ mod tests {
             };
             assert!((width(&e) - BAR_WIDTH).abs() < 1e-4);
             e.health = kind.max_health() / 2;
-            assert!((width(&e) - BAR_WIDTH / 2.0).abs() < 1e-4);
+            let fraction = e.health as f32 / kind.max_health() as f32;
+            assert!((width(&e) - BAR_WIDTH * fraction).abs() < 1e-4, "{kind:?}");
         }
     }
 
