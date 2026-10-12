@@ -44,15 +44,31 @@ How a game runs:
 ## Running it
 
 ```
-cargo run --release                              # single player (optionally: -- 42 for a seed)
-cargo run --release -p gamedemo-host -- 7777 42  # host: port, seed (both optional)
+cargo run --release                              # single player: carries on your saved game
+cargo run --release -- new [seed]                # a new single player world (old save kept as .bak)
+cargo run --release -p gamedemo-host -- 7777     # host: port [seed] [save file], see Saving
 cargo run --release -- join 192.168.1.20:7777 Ann  # join a host (name is optional)
 cargo run -p gamedemo-host --bin walker -- 127.0.0.1:7777 20 BOT  # window-less test player
 cargo test --workspace
 ```
 
-The host listens on all addresses on its port, takes up to 16 players, and nothing is saved
-when it stops.
+The host listens on all addresses on its port and takes up to 16 players.
+
+## Saving
+
+- **Single player** is saved in `saves/single.save` (in the folder you run the game from): every
+  30 seconds and when you quit with Esc. Running `gamedemo` again carries on from it. `gamedemo
+  new [seed]` (or `gamedemo 42`) starts a new world and keeps the old save as `single.save.bak`.
+- **A host** keeps its game in `host.save` (or the third argument): every 30 seconds and when it
+  is stopped with Ctrl-C. Starting it again carries on from the file, with the saved seed. To
+  start a new world, move the file away or name a different one. If the file is damaged the host
+  refuses to start rather than write over it.
+- **What is saved**: the world's changed blocks, fires, which creatures are still waiting to
+  come back, and every player by name (resources, converter, health, where they stood), including
+  those who left earlier. Players come back by joining with the same name. Creatures are not
+  saved: they are always at home, unhurt, when someone comes near.
+- Killing the host without Ctrl-C loses up to 30 seconds. A save only works with the same
+  version of the game (`SAVE_VERSION`).
 
 ## Done
 
@@ -67,6 +83,9 @@ when it stops.
       blocks) and see cracks on the block they are mining.
 - [x] Creatures placed from the seed like terrain, more and tougher in dangerous biomes, and
       respawning after being defeated (about 350 in a world; only the ones near players exist).
+- [x] Saving: single player and hosts keep the game in a file, written every 30 seconds and on
+      exit, and carry on from it (`game::save`, `game-net` `save.rs`). Covered by tests and by
+      quitting and restarting the real game.
 - [x] Names, a player list (Tab), name tags over heads, chat (Enter), and rejoining with the same
       name to get your things back. Covered by `game-net/tests/sync.rs` and checked in the real
       window.
@@ -83,18 +102,15 @@ None of these stop it from working; they are roughly in the order worth doing.
 
 1. **Fighting through the real window, and longer play sessions.** The fight is covered by the
    scripted network test, but not by driving the window.
-2. **Saving.** Nothing is saved: the world and every player's resources are gone when the host
-   stops, and so is what the host remembers about players who left (so rejoining only works
-   while the host runs). (Single player never saved either.) The block changes already tracked
-   by the world would make saving the world easy; player state would need a file too, and could
-   be keyed by name like rejoining is.
-3. **Single-player memory.** The host and the game each build their own copy of the world, so it
+2. **Single-player memory.** The host and the game each build their own copy of the world, so it
    uses about twice the memory (they are built at the same time, so start-up isn't doubled).
    Could be fixed by sharing one copy in single player.
-4. **Tuning creatures.** The numbers are guesses until played: creatures per cell by biome
+3. **Tuning creatures.** The numbers are guesses until played: creatures per cell by biome
    (`spawns::creatures_per_cell`), health per kind (`Kind::max_health`), wake distance and the
    5 minute respawn (`spawns.rs`). All creatures hit for the same 2d6, so difficulty is health
    and number only; a per-kind damage bonus would be the next lever.
 
 Decided not to do: cheating protection, internet play help (typing in a public IP works), and
 sending big worlds to a joining player in pieces.
+Single player has one save slot (`saves/single.save`); more than one world would need a way to
+pick between files.

@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::world::Block;
 
 /// How long a block burns before it turns into coal.
@@ -142,7 +144,7 @@ pub fn effect_for(dense_kind: usize, block: Block) -> Option<Effect> {
 }
 
 /// Blocks that are currently on fire, and how long each has left.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Fires {
     burning: Vec<((i32, i32, i32), f32)>,
 }

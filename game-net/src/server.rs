@@ -3,22 +3,26 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use game_core::game::{Command, Game, PlayerId};
+use game_core::game::{Command, Game, PlayerId, SaveData};
 
 use crate::protocol::{
     tidy_chat, tidy_name, ClientMessage, ServerMessage, Tick, Welcome, MAX_PLAYERS,
     PROTOCOL_VERSION, TICK_SECONDS,
 };
+use crate::save;
 use crate::wire;
 
 /// How many updates can be waiting to go out to one player before they are dropped as too slow.
 const OUTBOX: usize = 64;
+/// How often a host with a save file writes it, in seconds.
+const AUTOSAVE_SECONDS: u64 = 30;
 /// How long a new connection has to say hello.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -41,6 +45,8 @@ pub struct Server {
     seed: u32,
     stop: Arc<AtomicBool>,
     quiet: bool,
+    /// Where the game is saved, and what was in the file when it was opened.
+    save: Option<(PathBuf, Option<SaveData>)>,
 }
 
 impl Server {
@@ -51,7 +57,37 @@ impl Server {
             seed,
             stop: Arc::new(AtomicBool::new(false)),
             quiet: false,
+            save: None,
         })
+    }
+
+    /// Keeps the game in the file at `path`: if there is one, the game carries on from it (and
+    /// the world's seed is the one in the file, whatever was asked for); either way it is
+    /// written every half minute and when the host stops. A file that can't be read is an
+    /// error, so a damaged save is never written over.
+    pub fn with_save(mut self, path: impl Into<PathBuf>) -> io::Result<Server> {
+        let path = path.into();
+        let data = if path.exists() {
+            let data = save::read_save(&path).map_err(|e| {
+                io::Error::new(e.kind(), format!("can't use {}: {e}", path.display()))
+            })?;
+            self.seed = data.seed;
+            Some(data)
+        } else {
+            None
+        };
+        self.save = Some((path, data));
+        Ok(self)
+    }
+
+    /// The seed of the world: the one asked for, or the saved game's.
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    /// Whether the game is carrying on from a save file.
+    pub fn continues_a_save(&self) -> bool {
+        self.save.as_ref().is_some_and(|(_, data)| data.is_some())
     }
 
     /// Don't print who joins and leaves.
@@ -70,7 +106,7 @@ impl Server {
     }
 
     /// Runs the game until stopped.
-    pub fn run(self) -> io::Result<()> {
+    pub fn run(mut self) -> io::Result<()> {
         let (to_loop, incoming) = mpsc::channel::<Incoming>();
         let listener = self.listener.try_clone()?;
         let stop = self.stop.clone();
@@ -78,6 +114,21 @@ impl Server {
 
         let quiet = self.quiet;
         let mut game = Game::new(self.seed);
+        let mut save_path = None;
+        if let Some((path, data)) = self.save.take() {
+            if let Some(data) = data
+                && let Err(e) = game.restore(data)
+            {
+                return Err(io::Error::other(format!("can't use {}: {e}", path.display())));
+            }
+            save_path = Some(path);
+        }
+        let mut last_save = Instant::now();
+        let write = |game: &Game, path: &PathBuf| {
+            if let Err(e) = save::write_save(path, &game.save_data()) {
+                eprintln!("can't save to {}: {e}", path.display());
+            }
+        };
         let mut clients: HashMap<u64, Connected> = HashMap::new();
         let mut tick_number: u64 = 0;
         // (Nobody needs to know about chat lines that could not be delivered.)
@@ -188,6 +239,13 @@ impl Server {
                 }
             }
 
+            if let Some(path) = &save_path
+                && last_save.elapsed() >= Duration::from_secs(AUTOSAVE_SECONDS)
+            {
+                write(&game, path);
+                last_save = Instant::now();
+            }
+
             let now = Instant::now();
             if next > now {
                 thread::sleep(next - now);
@@ -196,6 +254,9 @@ impl Server {
                 // Running behind: don't try to catch up with a burst of ticks.
                 next = now + tick;
             }
+        }
+        if let Some(path) = &save_path {
+            write(&game, path);
         }
         Ok(())
     }

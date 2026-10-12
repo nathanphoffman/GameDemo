@@ -10,11 +10,29 @@ Built from scratch with `winit` (window and input), `wgpu` (graphics), and `glam
 cargo run --release
 ```
 
-To get the same world again, pass a seed (the seed is printed on launch):
+The game is saved in `saves/single.save` (every 30 seconds, and when you quit with Esc), and
+running it again carries on from there. To start a new world, or to get the same world again
+from a seed (the seed is printed on launch):
 
 ```
-cargo run --release -- 42
+cargo run --release -- new
+cargo run --release -- new 42
 ```
+
+The old save is kept as `saves/single.save.bak`.
+
+## Multiplayer
+
+One computer runs the host (no window), and everyone else joins it with its address:
+
+```
+cargo run --release -p gamedemo-host -- 7777          # port [seed] [save file]
+cargo run --release -- join 192.168.1.20:7777 Ann     # name is optional
+```
+
+The host keeps its game in `host.save` and carries on from it when started again. Coming back
+with the same name gets your things back. Enter opens the chat, Tab shows who is playing. See
+`multiplayer_todo.md` for how it works.
 
 ## Controls
 

@@ -6,6 +6,7 @@
 
 mod client;
 mod protocol;
+mod save;
 mod server;
 mod wire;
 
@@ -14,4 +15,5 @@ pub use protocol::{
     tidy_chat, tidy_name, ClientMessage, ServerMessage, Tick, Welcome, MAX_CHAT, MAX_NAME,
     MAX_PLAYERS, PROTOCOL_VERSION, TICK_SECONDS,
 };
+pub use save::{read_save, write_save};
 pub use server::Server;

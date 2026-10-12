@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 game-core = { path = "../game-core" }
 game-net = { path = "../game-net" }
+ctrlc = "3"

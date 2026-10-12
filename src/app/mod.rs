@@ -50,8 +50,10 @@ const POSE_INTERVAL: f32 = 1.0 / 60.0;
 
 /// How to start.
 pub(crate) enum Start {
-    /// Play alone, on a host that runs inside this program.
-    Alone { seed: u32, name: String },
+    /// Play alone, on a host that runs inside this program, keeping the game in `save`. With
+    /// `fresh`, a new world (of `seed`, if given) replaces the saved one (which is kept as
+    /// `save.bak`); otherwise the saved game is carried on, if there is one.
+    Alone { seed: Option<u32>, fresh: bool, save: std::path::PathBuf, name: String },
     /// Join a host at this address.
     Join { addr: String, name: String },
 }
@@ -395,21 +397,57 @@ impl App {
     }
 }
 
+/// The host that runs inside the program in single player, which has to be told to stop (it
+/// saves the game then) and waited for before the program ends.
+struct InnerHost {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl InnerHost {
+    fn finish(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.thread.join();
+    }
+}
+
+/// A random world number.
+fn random_seed() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
+        .unwrap_or(1)
+}
+
 /// Connects to a host (starting one first when playing alone) and waits for the first update.
-fn connect(start: Start) -> Result<(Client, Mirror), String> {
+fn connect(start: Start) -> Result<(Client, Mirror, Option<InnerHost>), String> {
+    let mut inner = None;
     let (client, mirror) = match start {
-        Start::Alone { seed, name } => {
-            let server = Server::bind("127.0.0.1:0", seed)
-                .map_err(|e| format!("can't start the game: {e}"))?
-                .quiet();
+        Start::Alone { seed, fresh, save, name } => {
+            if fresh && save.exists() {
+                let mut old = save.clone().into_os_string();
+                old.push(".bak");
+                std::fs::rename(&save, old).map_err(|e| format!("can't keep the old save: {e}"))?;
+            }
+            let server = Server::bind("127.0.0.1:0", seed.unwrap_or_else(random_seed))
+                .and_then(|server| server.quiet().with_save(&save))
+                .map_err(|e| format!("can't start the game: {e}"))?;
             let addr = server.local_addr().map_err(|e| e.to_string())?;
-            std::thread::spawn(move || {
+            let world_seed = server.seed();
+            if server.continues_a_save() {
+                println!("carrying on the game in {}", save.display());
+            }
+            println!("world seed: {world_seed}");
+            let stop = server.stop_flag();
+            let thread = std::thread::spawn(move || {
                 if let Err(e) = server.run() {
                     eprintln!("the game stopped: {e}");
                 }
             });
+            inner = Some(InnerHost { stop, thread });
             // The host is making its world; make ours at the same time.
-            let world = World::generate(seed);
+            let world = World::generate(world_seed);
             let (client, welcome) =
                 Client::connect(addr, &name).map_err(|e| format!("can't start the game: {e}"))?;
             (client, Mirror::with_world(&welcome, world))
@@ -433,9 +471,9 @@ fn connect(start: Start) -> Result<(Client, Mirror), String> {
         }
     };
     let (mut client, mut mirror) = (client, mirror);
-    let start = Instant::now();
+    let started = Instant::now();
     while mirror.latest.is_none() {
-        if start.elapsed() > Duration::from_secs(15) {
+        if started.elapsed() > Duration::from_secs(15) {
             return Err("the host didn't send anything".into());
         }
         match client.wait_tick(Duration::from_millis(200)) {
@@ -444,12 +482,12 @@ fn connect(start: Start) -> Result<(Client, Mirror), String> {
             Err(e) => return Err(format!("lost the host: {e}")),
         }
     }
-    Ok((client, mirror))
+    Ok((client, mirror, inner))
 }
 
 /// Opens the window and runs the game until it is closed.
 pub(crate) fn run(start: Start) {
-    let (net, mirror) = match connect(start) {
+    let (net, mirror, inner) = match connect(start) {
         Ok(connection) => connection,
         Err(message) => {
             eprintln!("{message}");
@@ -460,4 +498,9 @@ pub(crate) fn run(start: Start) {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new(net, mirror);
     event_loop.run_app(&mut app).unwrap();
+    // Let go of the connection, then give the inner host the moment it needs to save the game.
+    drop(app);
+    if let Some(host) = inner {
+        host.finish();
+    }
 }

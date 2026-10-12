@@ -181,7 +181,7 @@ impl Resources {
 
 /// The conversion pipeline: one kind at a time is selected, and every `CONVERT_INTERVAL`
 /// seconds, if `CONVERT_COST` of it are on hand, they are turned into one dense one.
-#[derive(Default)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Converter {
     selected: Option<usize>,
     progress: f32,

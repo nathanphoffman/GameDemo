@@ -6,10 +6,12 @@
 mod blocks;
 mod fight;
 pub mod sights;
+mod save;
 mod snapshot;
 pub mod spawns;
 mod update;
 
+pub use save::{SaveData, SavedPlayer, SAVE_VERSION};
 pub use snapshot::{EnemyView, PlayerView, Snapshot, YouView};
 
 use glam::Vec3;
