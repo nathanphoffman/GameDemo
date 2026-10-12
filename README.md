@@ -160,3 +160,21 @@ If your health runs out you come back at the world's starting point at full heal
 resources, with Resurrection Sickness for 1 minute: mining, resource conversion and attacking
 are twice as slow (you attack in every other round). A purple bar under the resource list counts
 it down.
+
+## Building releases
+
+```
+./build.sh            # Linux and Windows
+./build.sh linux
+./build.sh windows
+```
+
+This writes `dist/gamedemo-<version>-linux-x86_64.zip` and `dist/gamedemo-<version>-windows-x86_64.zip`,
+each with the game, the host (`gamedemo-host`) and this README. The Windows version is built from
+Linux with `zig` as the linker: the first run downloads it into `tools/zig/` (see
+`tools/get-zig.sh`; nothing is installed system-wide) and installs `cargo-zigbuild`.
+
+The Linux build needs the ALSA sound library (`libasound2`) and a Vulkan driver to run. The Windows
+build has no extra requirements on Windows 10 or later. Both open a console window next to the
+game, which shows the world seed and connection messages.
+

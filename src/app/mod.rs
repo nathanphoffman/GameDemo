@@ -522,9 +522,14 @@ pub(crate) fn run(start: Start) {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new(net, mirror);
     event_loop.run_app(&mut app).unwrap();
+    let lost = app.connection_lost;
     // Let go of the connection, then give the inner host the moment it needs to save the game.
     drop(app);
     if let Some(host) = inner {
         host.finish();
+    }
+    if lost {
+        // Not a normal quit: the launcher script offers to join again.
+        std::process::exit(2);
     }
 }
