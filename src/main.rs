@@ -21,7 +21,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use hud::{HudVertex, MAX_HUD_VERTICES};
-use combat::{Combat, Side, MAX_PLAYER_HP};
+use combat::{Candidate, Combat, Side, MAX_PLAYER_HP};
 use enemy::{Dice, Enemy, Kind, Sight};
 use player::Player;
 use resources::Resources;
@@ -33,12 +33,12 @@ const MOUSE_SENSITIVITY: f32 = 0.0022;
 const FOV_Y_DEGREES: f32 = 80.0;
 const MINE_INTERVAL: f32 = 2.0 / 3.0; // seconds of holding to mine one block
 const REACH: f32 = 5.0; // blocks
-// Hostile enemies attack on their own when they are this close (horizontally)...
+// Hostile creatures can attack you from this close (horizontally)...
 const MELEE_RANGE: f32 = 2.3;
-// ...and you can pick a fight with a passive one by clicking on it from this close.
+// ...you can attack them from this close (and click a passive one to start a fight).
 const NEAR_RANGE: f32 = 3.0;
-// ...and then has to wait this long after an exchange ends before he can do it again.
-const ENEMY_COOLDOWN: f32 = 2.0;
+// After a round ends, the next one can't start for this long.
+const ROUND_PAUSE: f32 = 2.0;
 // How fast the health bar's draining chunk catches up, in hp per second.
 const HP_DRAIN_PER_SECOND: f32 = 30.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -586,14 +586,12 @@ struct App {
     resources: Resources,
     mine_timer: f32,
     enemies: Vec<Enemy>,
-    /// The enemy the current (or last) exchange is against.
-    engaged: Option<u32>,
     dice: Dice,
     /// Last roll and how long ago it happened.
     combat: Combat,
     /// Health shown on the bar; trails the real value after a hit so the loss is visible.
     hp_shown: f32,
-    enemy_cooldown: f32,
+    round_pause: f32,
     was_busy: bool,
     _music: Option<music::Music>,
 }
@@ -640,9 +638,34 @@ impl App {
         Some(sight)
     }
 
+    /// Hostile creatures within `range` of the player (horizontally, and not on another
+    /// level), as combat candidates. Dead ones are left out.
+    fn hostile_within(&self, range: f32) -> Vec<Candidate> {
+        self.enemies
+            .iter()
+            .filter(|e| e.hostile && e.health > 0)
+            .filter(|e| {
+                let offset = e.pos() - self.player.pos;
+                Vec3::new(offset.x, 0.0, offset.z).length() <= range && offset.y.abs() < 2.5
+            })
+            .map(|e| Candidate {
+                id: e.id,
+                hp: e.health,
+            })
+            .collect()
+    }
+
+    /// Who can hit the player right now, and who the player can hit.
+    fn fight_lists(&self) -> (Vec<Candidate>, Vec<Candidate>) {
+        (
+            self.hostile_within(MELEE_RANGE),
+            self.hostile_within(NEAR_RANGE),
+        )
+    }
+
     /// A click picks a fight with a passive enemy you are close to and looking at. It turns
-    /// hostile, and from then on fights on its own like any other hostile one. Clicking a
-    /// hostile enemy does nothing: those start fights themselves.
+    /// hostile and a round starts with my attack. After that it fights on its own like any
+    /// other hostile one. Clicking a hostile enemy does nothing: those start rounds themselves.
     fn attack(&mut self) {
         if self.combat.player_hp <= 0 {
             return;
@@ -653,31 +676,33 @@ impl App {
         if sight.hostile || sight.distance > NEAR_RANGE {
             return;
         }
-        // Clicking again mid-exchange skips ahead: everything in flight lands right now, and
-        // the health bar jumps to its final value instead of draining.
-        self.combat.resolve_now(&mut self.dice);
+        // Clicking mid-round skips ahead: everything in flight lands right now, and the
+        // health bar jumps to its final value instead of draining.
+        let (attackers, targets) = self.fight_lists();
+        self.combat.resolve_now(&mut self.dice, &attackers, &targets);
         self.hp_shown = self.combat.player_hp as f32;
         self.sync_enemies();
+
         if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == sight.id) {
             enemy.provoke();
-            self.engaged = Some(enemy.id);
-            self.combat
-                .begin(Side::Player, enemy.health, &mut self.dice);
         }
+        let (attackers, targets) = self.fight_lists();
+        self.combat
+            .begin_round(Side::Player, &attackers, &targets, &mut self.dice);
     }
 
-    /// Copies the fight's result onto the enemy it was against, and removes the dead.
+    /// Copies the fight's result onto the creature it hit, and removes the dead.
     fn sync_enemies(&mut self) {
-        if let Some(id) = self.engaged {
-            if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == id) {
-                enemy.health = self.combat.enemy_hp;
+        if let Some(target) = self.combat.target {
+            if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == target.id) {
+                enemy.health = enemy.health.min(target.hp);
             }
         }
         self.enemies.retain(|e| e.health > 0);
     }
 
-    /// One frame of enemy behavior: hostile ones chase the player, and the first that gets
-    /// close enough (once the cooldown allows) starts a fight.
+    /// One frame of enemy behavior: hostile ones chase the player, and once any of them is
+    /// close enough (and the pause after the last round is over) a round begins.
     fn update_enemies(&mut self, dt: f32) {
         let player_alive = self.combat.player_hp > 0;
         let target = self.player.pos;
@@ -685,19 +710,14 @@ impl App {
             enemy.update(dt, target, player_alive, &self.world);
         }
 
-        self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
-        if self.enemy_cooldown > 0.0 || self.combat.busy() || !player_alive {
+        self.round_pause = (self.round_pause - dt).max(0.0);
+        if self.round_pause > 0.0 || self.combat.busy() || !player_alive {
             return;
         }
-        let attacker = self.enemies.iter().find(|e| {
-            let to_player = target - e.pos();
-            e.hostile
-                && Vec3::new(to_player.x, 0.0, to_player.z).length() <= MELEE_RANGE
-                && to_player.y.abs() < 2.5
-        });
-        if let Some(enemy) = attacker {
-            self.engaged = Some(enemy.id);
-            self.combat.begin(Side::Enemy, enemy.health, &mut self.dice);
+        let (attackers, targets) = self.fight_lists();
+        if !attackers.is_empty() {
+            self.combat
+                .begin_round(Side::Enemy, &attackers, &targets, &mut self.dice);
         }
     }
 
@@ -820,14 +840,16 @@ impl ApplicationHandler for App {
                 }
 
                 // The fight: dice age and land, damage applies, replies roll.
-                self.combat.update(dt, &mut self.dice);
+                let (attackers, targets) = self.fight_lists();
+                self.combat
+                    .update(dt, &mut self.dice, &attackers, &targets);
                 self.sync_enemies();
-                self.update_enemies(dt);
                 let busy = self.combat.busy();
                 if self.was_busy && !busy {
-                    self.enemy_cooldown = ENEMY_COOLDOWN;
+                    self.round_pause = ROUND_PAUSE;
                 }
                 self.was_busy = busy;
+                self.update_enemies(dt);
                 let hp = self.combat.player_hp as f32;
                 self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(hp);
 
@@ -849,6 +871,12 @@ impl ApplicationHandler for App {
                 });
 
                 let look_at = self.player.pos;
+                let enemy_rolls: Vec<(u32, u32, f32)> = self
+                    .combat
+                    .enemy_rolls
+                    .iter()
+                    .map(|r| r.view())
+                    .collect();
                 let enemy_mesh: Vec<Vertex> = self
                     .enemies
                     .iter()
@@ -864,7 +892,7 @@ impl ApplicationHandler for App {
                         gfx.config.height,
                         self.resources.as_array(),
                         self.combat.player_roll.map(|r| r.view()),
-                        self.combat.enemy_roll.map(|r| r.view()),
+                        &enemy_rolls,
                         (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
                     );
                     gfx.render(self.player.eye(), self.player.forward(), &hud);
@@ -914,11 +942,10 @@ fn main() {
         resources: Resources::default(),
         mine_timer: 0.0,
         enemies,
-        engaged: None,
         dice: Dice::new(),
         combat: Combat::new(),
         hp_shown: MAX_PLAYER_HP as f32,
-        enemy_cooldown: 0.0,
+        round_pause: 0.0,
         was_busy: false,
         _music: music::Music::start(),
     };

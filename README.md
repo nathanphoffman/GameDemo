@@ -41,14 +41,16 @@ Hold the left mouse button while the crosshair is on a block. Every two-thirds o
 
 ## Fighting
 
-You have 50 HP (the bar at the bottom of the screen). Enemies have a health bar over their head. Every fight is an exchange of two rolls: whoever starts rolls 2d6, and when those dice land the other side always rolls back. Dice tumble on screen (yours at the top, red ones above your health bar) and damage lands as they stop.
+You have 50 HP (the bar at the bottom of the screen). Enemies have a health bar over their head. Fighting happens in rounds, and the dice tumble on screen so you can see each roll land.
 
-- **Hostile enemies (skeleton, 12 HP):** when you are within 12 blocks they chase you (slowly) and attack on their own when they get close. You automatically hit back. No clicking needed, and clicking on them does nothing.
+- **A round:** every hostile creature within 2.3 blocks rolls 2d6 against you at the same time (red dice above your health bar, one pair each). Then you get exactly one attack, 2d6 against the weakest hostile creature within 3 blocks (your dice, at the top of the screen). Damage lands as each set of dice stops.
+- **Who goes first:** when a creature starts the round, it hits you first. When you start it by clicking a passive animal, you hit first.
+- **Between rounds:** a 2 second pause, then the next round starts if anything hostile is still close.
+- **Hostile creatures (skeleton, 12 HP):** when you are within 12 blocks they chase you (slowly) and rounds start on their own. You never need to click, and clicking on them does nothing.
 - **Giving up:** get more than 20 blocks away and they give up and walk back to where they started. A skeleton stays hostile and will notice you again; a deer that you provoked calms down and goes back to being passive.
-- **Passive enemies (deer, 8 HP):** they stand around and leave you alone. Get close (within 3 blocks), look at one, and left click to attack it. After that it turns hostile and fights like the skeleton, until you get far enough away.
-- **Pause:** after a fight ends, hostile enemies wait a couple of seconds before starting another.
-- **Clicking fast:** clicking a passive enemy again mid-fight skips ahead. Everything in flight lands immediately and the health bar jumps to its final value.
-- **Dying:** enemies disappear at 0 HP. If you reach 0 HP the fight just stops (nothing else happens yet).
+- **Passive creatures (deer, 8 HP):** they stand around and leave you alone. Get close (within 3 blocks), look at one, and click to provoke it. It turns hostile and a round begins with your attack, which goes to the weakest hostile creature in range (which might be a different one).
+- **Clicking fast:** clicking a passive animal mid-round skips ahead. Everything in flight lands immediately and the health bar jumps to its final value.
+- **Dying:** creatures disappear at 0 HP. If you reach 0 HP the fighting just stops (nothing else happens yet).
 
 ## Layout
 
@@ -57,7 +59,7 @@ You have 50 HP (the bar at the bottom of the screen). Enemies have a health bar 
 | `src/main.rs` | Window, input, rendering |
 | `src/world.rs` | Block data, terrain generation, mesh building, collision queries |
 | `src/enemy.rs` | Skeleton and deer models, chasing, health bars, dice, ray-vs-box test |
-| `src/combat.rs` | Who attacks whom, when dice land, damage, replies |
+| `src/combat.rs` | Rounds: who rolls, who gets hit, when dice land |
 | `src/hud.rs` | Crosshair, rock counter, and mode label (tiny built-in pixel font) |
 | `src/resources.rs` | What each mined block gives you |
 | `src/player.rs` | Movement, gravity, jumping, collision |

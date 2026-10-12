@@ -237,7 +237,7 @@ pub fn build(
     resources: [u32; 4],
     // Each roll is (first die, second die, seconds since the roll started).
     player_roll: Option<(u32, u32, f32)>,
-    enemy_roll: Option<(u32, u32, f32)>,
+    enemy_rolls: &[(u32, u32, f32)],
     // (health shown on the bar, actual health, max health). The shown value trails the actual
     // one after a hit, which paints the draining chunk.
     hp: (f32, i32, i32),
@@ -299,9 +299,13 @@ pub fn build(
         &format!("HP {}/{}", actual.max(0), max as i32),
         white,
     );
-    if let Some(roll) = enemy_roll {
-        let rest_y = bar_y - 7.0 * scale - 3.0 * scale - 8.0 * scale;
-        draw_roll(&mut b, cx, rest_y, scale, roll, &ENEMY_DICE, false);
+    // One pair of red dice per attacker, side by side.
+    let rest_y = bar_y - 7.0 * scale - 3.0 * scale - 8.0 * scale;
+    let spacing = 17.0 * 4.0 * scale;
+    let count = enemy_rolls.len() as f32;
+    for (i, roll) in enemy_rolls.iter().enumerate() {
+        let x = cx + (i as f32 - (count - 1.0) / 2.0) * spacing;
+        draw_roll(&mut b, x, rest_y, scale, *roll, &ENEMY_DICE, false);
     }
 
     b.verts
@@ -315,11 +319,12 @@ mod tests {
     fn hud_always_fits_in_the_buffer() {
         for age in [0.0, 0.3, 0.9, 1.4, 1.5, 1.7, 2.5, 3.0] {
             for roll in [(1, 1, age), (6, 6, age), (3, 5, age)] {
-                let v = build(3840, 2160, [99999; 4], Some(roll), Some(roll), (50.0, 50, 50));
+                let four = [roll; 4];
+                let v = build(3840, 2160, [99999; 4], Some(roll), &four, (50.0, 50, 50));
                 assert!(v.len() <= MAX_HUD_VERTICES, "{} at age {age}", v.len());
             }
         }
-        let quiet = build(1920, 1080, [0; 4], None, None, (50.0, 50, 50));
+        let quiet = build(1920, 1080, [0; 4], None, &[], (50.0, 50, 50));
         assert!(quiet.len() < 3000, "{}", quiet.len());
     }
 }
