@@ -36,6 +36,7 @@ impl Resources {
             | Block::WoodFloor
             | Block::StoneFloor
             | Block::Forge
+            | Block::Furnace
             | Block::HousePlant => (0, 0, 0, 0, 0),
             Block::Dirt | Block::Stone => (1, 0, 0, 0, 0),
             Block::Grass => (1, 0, 1, 0, 0),
@@ -66,18 +67,30 @@ impl Resources {
         self.black += v.black;
     }
 
+    /// Blocks that are paid for with one dense resource instead of raw ones, and which kind
+    /// (0 = grey ... 4 = black). Placing a wooden floor cube costs a dense brown.
+    fn dense_price(block: Block) -> Option<usize> {
+        match block {
+            Block::WoodFloor => Some(3),
+            _ => None,
+        }
+    }
+
     /// Whether there is enough to place `block`.
     pub fn can_afford(&self, block: Block) -> bool {
+        if let Some(kind) = Self::dense_price(block) {
+            return self.dense[kind] >= 1;
+        }
         let v = Self::value_of(block);
-        // Fire, water and crafted blocks can't be bought, and air isn't a block.
+        // Fire, water and most crafted blocks can't be bought, and air isn't a block.
         !matches!(
             block,
             Block::Air
                 | Block::Burning
                 | Block::Water
-                | Block::WoodFloor
                 | Block::StoneFloor
                 | Block::Forge
+                | Block::Furnace
                 | Block::HousePlant
         )
             && self.grey >= v.grey
@@ -91,6 +104,10 @@ impl Resources {
     pub fn spend(&mut self, block: Block) -> bool {
         if !self.can_afford(block) {
             return false;
+        }
+        if let Some(kind) = Self::dense_price(block) {
+            self.dense[kind] -= 1;
+            return true;
         }
         let v = Self::value_of(block);
         self.grey -= v.grey;
@@ -114,6 +131,18 @@ impl Resources {
 
     pub fn as_array(&self) -> [u32; 5] {
         [self.grey, self.white, self.green, self.brown, self.black]
+    }
+
+    /// A generous pile of everything, raw and dense, for trying things out.
+    pub fn test_kit() -> Resources {
+        Resources {
+            grey: 100,
+            white: 100,
+            green: 100,
+            brown: 100,
+            black: 100,
+            dense: [25; 5],
+        }
     }
 
     fn raw_mut(&mut self, kind: usize) -> &mut u32 {
@@ -331,10 +360,39 @@ mod tests {
     #[test]
     fn crafted_blocks_give_nothing_and_cannot_be_placed() {
         let mut r = Resources::default();
-        for block in [Block::WoodFloor, Block::StoneFloor, Block::Forge, Block::HousePlant] {
+        for block in [
+            Block::StoneFloor,
+            Block::Forge,
+            Block::Furnace,
+            Block::HousePlant,
+        ] {
             r.gain(block);
             assert_eq!(r, Resources::default(), "{block:?}");
             assert!(!r.can_afford(block), "{block:?}");
         }
+    }
+
+    #[test]
+    fn a_wooden_floor_cube_costs_one_dense_brown() {
+        let mut r = Resources {
+            grey: 50,
+            brown: 50,
+            dense: [9, 9, 9, 0, 9],
+            ..Resources::default()
+        };
+        // Lots of raw brown and every other dense kind doesn't help.
+        assert!(!r.can_afford(Block::WoodFloor));
+        assert!(!r.spend(Block::WoodFloor));
+        assert_eq!(r.brown, 50);
+
+        r.dense[3] = 2;
+        assert!(r.spend(Block::WoodFloor));
+        assert_eq!((r.dense[3], r.brown), (1, 50), "one dense brown, no raw");
+        assert!(r.spend(Block::WoodFloor));
+        assert!(!r.can_afford(Block::WoodFloor));
+
+        // Mining one still gives nothing back, so there is no way to profit.
+        r.gain(Block::WoodFloor);
+        assert_eq!((r.dense[3], r.brown, r.grey), (0, 50, 50));
     }
 }

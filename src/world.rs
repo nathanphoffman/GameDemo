@@ -29,13 +29,15 @@ pub enum Block {
     StoneFloor,
     /// Speeds up converting resources while the player is near.
     Forge,
+    /// A stronger forge, built on a stone floor.
+    Furnace,
     HousePlant,
 }
 
 #[cfg(test)]
 impl Block {
     /// Every block type, for tests that check them all.
-    pub const ALL: [Block; 16] = [
+    pub const ALL: [Block; 17] = [
         Block::Air,
         Block::Grass,
         Block::Dirt,
@@ -51,6 +53,7 @@ impl Block {
         Block::WoodFloor,
         Block::StoneFloor,
         Block::Forge,
+        Block::Furnace,
         Block::HousePlant,
     ];
 }
@@ -62,6 +65,50 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub layer: f32,
     pub shade: f32,
+}
+
+// Texture layers used by the house plant model.
+const PLANT_POT: f32 = 28.0;
+const PLANT_SOIL: f32 = 30.0;
+const PLANT_LEAF: f32 = 31.0;
+
+/// The parts of the potted plant, in cell coordinates (0 to 1): pot, stem, a leafy bush, a
+/// tuft on top, and two leaves spread out in a cross. Face layers are in `FACES` order: +Y,
+/// -Y, +X, -X, +Z, -Z.
+const PLANT_PARTS: [([f32; 3], [f32; 3], [f32; 6]); 6] = [
+    (
+        [0.26, 0.0, 0.26],
+        [0.74, 0.38, 0.74],
+        [PLANT_SOIL, PLANT_POT, PLANT_POT, PLANT_POT, PLANT_POT, PLANT_POT],
+    ),
+    ([0.46, 0.38, 0.46], [0.54, 0.54, 0.54], [PLANT_LEAF; 6]),
+    ([0.30, 0.50, 0.30], [0.70, 0.78, 0.70], [PLANT_LEAF; 6]),
+    ([0.38, 0.78, 0.38], [0.62, 0.95, 0.62], [PLANT_LEAF; 6]),
+    ([0.10, 0.58, 0.42], [0.90, 0.70, 0.58], [PLANT_LEAF; 6]),
+    ([0.42, 0.58, 0.10], [0.58, 0.70, 0.90], [PLANT_LEAF; 6]),
+];
+
+/// Adds the potted plant model to a cell.
+fn push_plant(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, x: i32, y: i32, z: i32) {
+    for (min, max, layers) in PLANT_PARTS {
+        for (f, face) in FACES.iter().enumerate() {
+            let base = vertices.len() as u32;
+            for i in 0..4 {
+                let c = face.corners[i];
+                let mut pos = [0.0f32; 3];
+                for (k, origin) in [x, y, z].into_iter().enumerate() {
+                    pos[k] = origin as f32 + min[k] + c[k] * (max[k] - min[k]);
+                }
+                vertices.push(Vertex {
+                    pos,
+                    uv: face.uv[i],
+                    layer: layers[f],
+                    shade: face.shade,
+                });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
 }
 
 /// What a ray found: the block it hit, and the empty cell in front of the face it hit (None
@@ -478,6 +525,31 @@ impl World {
         }
     }
 
+    /// The cells of a staircase that climbs away from the block at (x, y, z): one step per
+    /// cell, each one block further along (dx, dz) and one block higher.
+    pub fn stair_cells(
+        x: i32,
+        y: i32,
+        z: i32,
+        (dx, dz): (i32, i32),
+        steps: i32,
+    ) -> impl Iterator<Item = (i32, i32, i32)> {
+        (1..=steps).map(move |i| (x + dx * i, y + i, z + dz * i))
+    }
+
+    /// Whether every step of such a staircase is inside the world and empty.
+    pub fn stairs_fit(&self, x: i32, y: i32, z: i32, dir: (i32, i32), steps: i32) -> bool {
+        Self::stair_cells(x, y, z, dir, steps).all(|(sx, sy, sz)| {
+            let inside = sx >= 0
+                && sz >= 0
+                && sy >= 0
+                && sx < SIZE_X as i32
+                && sz < SIZE_Z as i32
+                && sy < SIZE_Y as i32;
+            inside && self.get(sx, sy, sz) == Block::Air
+        })
+    }
+
     /// Whether there is a `block` within `radius` of `center` (measured to block centers).
     pub fn block_within(&self, center: Vec3, radius: f32, block: Block) -> bool {
         let r = radius.ceil() as i32;
@@ -666,9 +738,16 @@ impl World {
                     if block == Block::Air {
                         continue;
                     }
+                    // The house plant is a little model, not a cube.
+                    if block == Block::HousePlant {
+                        push_plant(&mut vertices, &mut indices, x, y, z);
+                        continue;
+                    }
                     for face in &FACES {
                         let [nx, ny, nz] = face.normal;
-                        if self.get(x + nx, y + ny, z + nz) != Block::Air {
+                        // Cells holding the plant don't hide the faces next to them.
+                        let beside = self.get(x + nx, y + ny, z + nz);
+                        if !matches!(beside, Block::Air | Block::HousePlant) {
                             continue;
                         }
                         if face.kind == 2 && y == 0 {
@@ -692,7 +771,7 @@ impl World {
                             (Block::WoodFloor, _) => 25.0,
                             (Block::StoneFloor, _) => 26.0,
                             (Block::Forge, _) => 27.0,
-                            (Block::HousePlant, _) => 28.0,
+                            (Block::Furnace, _) => 29.0,
                             _ => 2.0,
                         };
                         let base = vertices.len() as u32;
@@ -928,5 +1007,56 @@ mod tests {
         assert!(w.block_within(center + Vec3::new(5.0, 0.0, 0.0), 6.0, Block::Forge));
         assert!(!w.block_within(center + Vec3::new(7.0, 0.0, 0.0), 6.0, Block::Forge));
         assert!(!w.block_within(center, 6.0, Block::HousePlant));
+    }
+
+    #[test]
+    fn stairs_climb_one_block_per_step_and_need_room() {
+        let mut w = World::generate(5);
+        let s = w.spawn_point();
+        let (x, y, z) = (s.x.floor() as i32, s.y.floor() as i32 + 4, s.z.floor() as i32);
+        let cells: Vec<_> = World::stair_cells(x, y, z, (1, 0), 3).collect();
+        assert_eq!(cells, vec![(x + 1, y + 1, z), (x + 2, y + 2, z), (x + 3, y + 3, z)]);
+        assert!(w.stairs_fit(x, y, z, (1, 0), 3));
+        // Something in the way of the second step.
+        assert!(w.place_block(x + 2, y + 2, z, Block::Stone));
+        assert!(!w.stairs_fit(x, y, z, (1, 0), 3));
+        assert!(w.stairs_fit(x, y, z, (-1, 0), 3), "the other way is still open");
+        // Off the edge of the world.
+        assert!(!w.stairs_fit(SIZE_X as i32 - 2, y, z, (1, 0), 3));
+    }
+
+    #[test]
+    fn house_plant_is_a_small_model_that_does_not_hide_its_neighbours() {
+        let mut w = World::generate(5);
+        let s = w.spawn_point();
+        // A cell with open air on every side, a few blocks above the ground.
+        let (x, y, z) = (s.x.floor() as i32, s.y.floor() as i32 + 3, s.z.floor() as i32);
+        let before = w.build_mesh().0.len();
+        assert!(w.place_block(x, y, z, Block::HousePlant));
+        let (vertices, _) = w.build_mesh();
+        assert_eq!(vertices.len(), before + PLANT_PARTS.len() * 6 * 4);
+
+        // The cell was empty with air all around, so every vertex in it is the plant's. They
+        // are all well inside the cell sideways (the model is smaller than a cube).
+        let in_cell: Vec<&Vertex> = vertices
+            .iter()
+            .filter(|v| {
+                (x as f32..=x as f32 + 1.0).contains(&v.pos[0])
+                    && (y as f32..=y as f32 + 1.0).contains(&v.pos[1])
+                    && (z as f32..=z as f32 + 1.0).contains(&v.pos[2])
+            })
+            .collect();
+        assert_eq!(in_cell.len(), PLANT_PARTS.len() * 6 * 4);
+        assert!(in_cell.iter().all(|v| {
+            v.pos[0] > x as f32 + 0.05
+                && v.pos[0] < x as f32 + 0.95
+                && v.pos[2] > z as f32 + 0.05
+                && v.pos[2] < z as f32 + 0.95
+        }));
+
+        // A block next to it still gets its face on the plant's side.
+        assert!(w.place_block(x + 1, y, z, Block::Stone));
+        let with_stone = w.build_mesh().0.len();
+        assert_eq!(with_stone, before + PLANT_PARTS.len() * 6 * 4 + 6 * 4);
     }
 }

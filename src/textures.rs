@@ -1,14 +1,15 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 29; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 32; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
                             // 13 bone, 14 skull face, 15 ribs, 16 red, 17 green (health bar),
                             // 18 deer fur, 19 deer face, 20 pine bark, 21 pine log top,
                             // 22 fire, 23 coal, 24 water,
-                            // 25 wood floor, 26 stone floor, 27 forge, 28 house plant
+                            // 25 wood floor, 26 stone floor, 27 forge, 28 flower pot, 29 furnace, 30 potting soil,
+                            // 31 plant leaves
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -226,22 +227,37 @@ fn tile(layer: u32) -> Vec<u8> {
                         shaded([86.0, 86.0, 92.0], x, y, 73)
                     }
                 }
-                // House plant: green leaves in a brown pot, on a light wall.
-                28 => {
-                    let pot = y >= 10 && (4..12).contains(&x);
-                    let stem = (7..9).contains(&x) && (6..10).contains(&y);
-                    let leaves = {
-                        let (dx, dy) = (x as f32 - 7.5, y as f32 - 5.0);
-                        dx * dx + dy * dy * 1.4 < 22.0 && y < 10
-                    };
-                    if pot {
-                        shaded([150.0, 82.0, 52.0], x, y, 74)
-                    } else if stem {
-                        [60, 110, 40, 255]
-                    } else if leaves {
-                        shaded([58.0, 150.0, 60.0], x, y, 75)
+                // Furnace: darker, with a big white-hot mouth and a row of vents above it.
+                29 => {
+                    let mouth = (3..13).contains(&x) && (7..14).contains(&y);
+                    let hot = (5..11).contains(&x) && (9..13).contains(&y);
+                    let vent = y == 3 && x % 3 != 0;
+                    if hot {
+                        [255, 245, 190, 255]
+                    } else if mouth {
+                        [235, 110, 25, 255]
+                    } else if vent {
+                        [24, 24, 28, 255]
                     } else {
-                        shaded([226.0, 218.0, 196.0], x, y, 76)
+                        shaded([58.0, 58.0, 66.0], x, y, 77)
+                    }
+                }
+                // Flower pot: terracotta with a darker band near the top.
+                28 => {
+                    if y < 3 {
+                        shaded([120.0, 62.0, 38.0], x, y, 74)
+                    } else {
+                        shaded([184.0, 98.0, 60.0], x, y, 75)
+                    }
+                }
+                // Potting soil.
+                30 => shaded([70.0, 48.0, 34.0], x, y, 76),
+                // Plant leaves: bright green with lighter veins.
+                31 => {
+                    if x % 5 == 2 {
+                        shaded([110.0, 205.0, 100.0], x, y, 78)
+                    } else {
+                        shaded([52.0, 156.0, 62.0], x, y, 79)
                     }
                 }
                 // Coal: nearly black with a few lighter flecks.

@@ -32,6 +32,10 @@ pub enum Effect {
     BuildForge,
     /// A house plant is put on top of a wooden floor.
     PlantHouse,
+    /// A furnace is built on top of a stone floor.
+    BuildFurnace,
+    /// A staircase of wooden steps climbs away from a wooden floor.
+    BuildStairs,
 }
 
 impl Effect {
@@ -47,13 +51,18 @@ impl Effect {
             Effect::StoneFloor => "STONE",
             Effect::BuildForge => "FORGE",
             Effect::PlantHouse => "PLANT",
+            Effect::BuildFurnace => "FURNACE",
+            Effect::BuildStairs => "STAIRS",
         }
     }
 
     /// Whether this puts something new in the cell above the block (so that cell must be
     /// free), rather than changing the block itself.
     pub fn builds_on_top(self) -> bool {
-        matches!(self, Effect::BuildForge | Effect::PlantHouse)
+        matches!(
+            self,
+            Effect::BuildForge | Effect::PlantHouse | Effect::BuildFurnace
+        )
     }
 }
 
@@ -84,6 +93,8 @@ pub fn effect_for(dense_kind: usize, block: Block) -> Option<Effect> {
         (SEED, Block::Snow) => Some(Effect::GrowPine),
         (SEED, Block::WoodFloor) => Some(Effect::PlantHouse),
         (WOOD, b) if is_ground(b) => Some(Effect::LayFloor),
+        (WOOD, Block::WoodFloor) => Some(Effect::BuildStairs),
+        (CARBON, Block::StoneFloor) => Some(Effect::BuildFurnace),
         (CARBON, Block::WoodFloor) => Some(Effect::BuildForge),
         _ => None,
     }
@@ -149,6 +160,8 @@ mod tests {
             (SEED, Snow, Effect::GrowPine),
             (SEED, WoodFloor, Effect::PlantHouse),
             (CARBON, WoodFloor, Effect::BuildForge),
+            (CARBON, StoneFloor, Effect::BuildFurnace),
+            (WOOD, WoodFloor, Effect::BuildStairs),
         ];
         // Wood lays a floor over any natural ground.
         for ground in [Grass, Dirt, Snow, Stone] {
@@ -171,10 +184,14 @@ mod tests {
     #[test]
     fn crafted_things_stand_on_a_wooden_floor_and_the_floor_is_not_ground() {
         assert!(!is_ground(Block::WoodFloor));
-        assert_eq!(effect_for(WOOD, Block::WoodFloor), None, "no floor on a floor");
+        assert!(!is_ground(Block::StoneFloor));
         for ground in [Block::Grass, Block::Dirt, Block::Snow, Block::Stone] {
             assert_eq!(effect_for(CARBON, ground), None, "forges need a floor");
+            assert_ne!(effect_for(WOOD, ground), Some(Effect::BuildStairs));
         }
+        // A forge goes on wood, a furnace on stone: the next level up.
+        assert_eq!(effect_for(CARBON, Block::WoodFloor), Some(Effect::BuildForge));
+        assert_eq!(effect_for(CARBON, Block::StoneFloor), Some(Effect::BuildFurnace));
     }
 
     #[test]

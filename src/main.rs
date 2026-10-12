@@ -39,8 +39,12 @@ const REACH: f32 = 5.0; // blocks
 const MELEE_RANGE: f32 = 2.3;
 // ...you can attack them from this close (and click a passive one to start a fight).
 const NEAR_RANGE: f32 = 3.0;
-// A forge this close (in blocks) doubles the conversion speed.
+// A forge this close (in blocks) doubles the conversion speed; a furnace quadruples it from
+// further away.
 const FORGE_RANGE: f32 = 6.0;
+const FURNACE_RANGE: f32 = 10.0;
+// How many steps a staircase has (each is one block further and one block higher).
+const STAIR_STEPS: i32 = 6;
 // After a round ends, the next one can't start for this long.
 const ROUND_PAUSE: f32 = 2.0;
 // How fast the health bar's draining chunk catches up, in hp per second.
@@ -681,6 +685,15 @@ impl App {
             Effect::LayFloor => self.world.replace_block(x, y, z, Block::WoodFloor),
             Effect::StoneFloor => self.world.replace_block(x, y, z, Block::StoneFloor),
             Effect::BuildForge => self.world.place_block(x, y + 1, z, Block::Forge),
+            Effect::BuildFurnace => self.world.place_block(x, y + 1, z, Block::Furnace),
+            Effect::BuildStairs => {
+                let dir = self.stair_dir();
+                let mut built = false;
+                for (sx, sy, sz) in world::World::stair_cells(x, y, z, dir, STAIR_STEPS) {
+                    built |= self.world.place_block(sx, sy, sz, Block::WoodFloor);
+                }
+                built
+            }
             Effect::PlantHouse => self.world.place_block(x, y + 1, z, Block::HousePlant),
         };
         if changed {
@@ -700,6 +713,12 @@ impl App {
             e if e.builds_on_top() => {
                 self.world.get(x, y + 1, z) == world::Block::Air
                     && !self.cell_has_creature(x, y + 1, z)
+            }
+            Effect::BuildStairs => {
+                let dir = self.stair_dir();
+                self.world.stairs_fit(x, y, z, dir, STAIR_STEPS)
+                    && !world::World::stair_cells(x, y, z, dir, STAIR_STEPS)
+                        .any(|(sx, sy, sz)| self.cell_has_creature(sx, sy, sz))
             }
             _ => true,
         };
@@ -877,6 +896,16 @@ impl App {
         if let Some(block) = self.world.remove_block(x, y, z) {
             self.resources.gain(block);
             self.rebuild_mesh();
+        }
+    }
+
+    /// The direction the player is mostly facing, as a unit step along x or z.
+    fn stair_dir(&self) -> (i32, i32) {
+        let (fx, fz) = (self.player.yaw.sin(), -self.player.yaw.cos());
+        if fx.abs() > fz.abs() {
+            (fx.signum() as i32, 0)
+        } else {
+            (0, fz.signum() as i32)
         }
     }
 
@@ -1131,13 +1160,19 @@ impl ApplicationHandler for App {
                 let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
                 // The conversion pipeline and the fires work in the background. Standing
                 // near a forge makes the conversion twice as fast.
-                let forge_boost = self.world.block_within(
-                    self.player.eye(),
-                    FORGE_RANGE,
-                    world::Block::Forge,
-                );
-                let speed = if forge_boost { 2.0 } else { 1.0 };
-                self.converter.update(dt * speed, &mut self.resources);
+                let eye = self.player.eye();
+                let conversion_boost = if self
+                    .world
+                    .block_within(eye, FURNACE_RANGE, world::Block::Furnace)
+                {
+                    4
+                } else if self.world.block_within(eye, FORGE_RANGE, world::Block::Forge) {
+                    2
+                } else {
+                    1
+                };
+                self.converter
+                    .update(dt * conversion_boost as f32, &mut self.resources);
                 let burnt_out = self.fires.update(dt);
                 let mut changed = false;
                 for (x, y, z) in burnt_out {
@@ -1216,7 +1251,7 @@ impl ApplicationHandler for App {
                                 .selected()
                                 .map(|kind| (kind, self.converter.fraction())),
                             ctrl_held: self.keys.ctrl,
-                            forge_boost,
+                            conversion_boost,
                             player_roll: self.combat.player_roll.map(|r| r.view()),
                             enemy_rolls: &enemy_rolls,
                             hp: (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
@@ -1266,7 +1301,9 @@ fn main() {
         player,
         keys: Keys::default(),
         last_frame: Instant::now(),
-        resources: Resources::default(),
+        // A big pile of everything to try things out with. Use `Resources::default()` for a
+        // normal start.
+        resources: Resources::test_kit(),
         converter: Converter::default(),
         fires: Fires::default(),
         menu: None,

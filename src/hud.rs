@@ -55,6 +55,7 @@ fn glyph(c: char) -> [u8; 5] {
         'L' => [0b100, 0b100, 0b100, 0b100, 0b111],
         'R' => [0b110, 0b101, 0b110, 0b101, 0b101],
         'S' => [0b011, 0b100, 0b010, 0b001, 0b110],
+        'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
         'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
         'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
         'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
@@ -264,8 +265,9 @@ pub struct HudInfo<'a> {
     pub converting: Option<(usize, f32)>,
     /// Ctrl is held, so the resource rows can be clicked.
     pub ctrl_held: bool,
-    /// A forge is nearby, so conversion is running at double speed.
-    pub forge_boost: bool,
+    /// How many times faster than normal conversion is running (1, 2 with a forge nearby, 4
+    /// with a furnace).
+    pub conversion_boost: u32,
     /// Each roll is (first die, second die, seconds since the roll started).
     pub player_roll: Option<(u32, u32, f32)>,
     pub enemy_rolls: &'a [(u32, u32, f32)],
@@ -297,7 +299,7 @@ pub fn resource_row_at(height: u32, x: f32, y: f32) -> Option<usize> {
 
 // The apply menu, in font pixels: a panel in the middle of the screen with a title and one
 // row per dense resource.
-const MENU_WIDTH: f32 = 62.0;
+const MENU_WIDTH: f32 = 70.0;
 const MENU_TITLE_HEIGHT: f32 = 11.0;
 const MENU_ROW_PITCH: f32 = 9.0;
 const MENU_HEIGHT: f32 = MENU_TITLE_HEIGHT + KINDS as f32 * MENU_ROW_PITCH + 2.0;
@@ -335,7 +337,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
         menu,
         converting,
         ctrl_held,
-        forge_boost,
+        conversion_boost,
         player_roll,
         enemy_rolls,
         hp,
@@ -381,8 +383,9 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
             b.rect(x0, y0, w0, h0, backing);
             if let Some((_, fraction)) = selected {
                 b.rect(x0, y0, w0 * fraction.clamp(0.0, 1.0), h0, [0.50, 0.38, 0.08]);
-                if forge_boost {
-                    b.text(x0 + (ROW_WIDTH + 2.0) * scale, y + 0.5 * scale, scale, "X2", [1.0, 0.65, 0.2]);
+                if conversion_boost > 1 {
+                    let label = format!("X{conversion_boost}");
+                    b.text(x0 + (ROW_WIDTH + 2.0) * scale, y + 0.5 * scale, scale, &label, [1.0, 0.65, 0.2]);
                 }
             }
         }
@@ -457,7 +460,7 @@ pub fn build(width: u32, height: u32, info: &HudInfo) -> Vec<HudVertex> {
             b.text(x0 + 16.0 * scale, top + 1.5 * scale, scale, &dense[row].to_string(), white);
             if let Some(label) = labels[row] {
                 let tint = if usable { [1.0, 0.65, 0.2] } else { [0.5, 0.5, 0.55] };
-                b.text(x0 + 38.0 * scale, top + 1.5 * scale, scale, label, tint);
+                b.text(x0 + 34.0 * scale, top + 1.5 * scale, scale, label, tint);
             }
         }
     }
@@ -520,7 +523,7 @@ mod tests {
                     menu: Some([Some("FIRE"); KINDS]),
                     converting: Some((2, 0.5)),
                     ctrl_held: true,
-                    forge_boost: true,
+                    conversion_boost: 4,
                     player_roll: Some(roll),
                     enemy_rolls: &four,
                     hp: (50.0, 50, 50),
@@ -538,7 +541,7 @@ mod tests {
                 menu: None,
                 converting: None,
                 ctrl_held: false,
-                forge_boost: false,
+                conversion_boost: 1,
                 player_roll: None,
                 enemy_rolls: &[],
                 hp: (50.0, 50, 50),
