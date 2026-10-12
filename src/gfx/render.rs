@@ -2,7 +2,8 @@
 
 use glam::{Mat4, Vec3};
 
-use super::{Gfx, Globals, FOV_Y_DEGREES};
+use super::{Gfx, Globals, DRAW_DISTANCE, FOV_Y_DEGREES};
+use crate::world::{CHUNK, CHUNKS_X};
 use crate::hud::{HudVertex, MAX_HUD_VERTICES};
 use crate::weather::{self, Weather};
 
@@ -90,9 +91,20 @@ impl Gfx {
             pass.draw(0..3, 0..1);
 
             pass.set_pipeline(&self.block_pipeline);
-            pass.set_vertex_buffer(0, self.mesh_vertices.slice(..));
-            pass.set_index_buffer(self.mesh_indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
+            for (i, chunk) in self.chunks.iter().enumerate() {
+                let Some(chunk) = chunk else { continue };
+                // Straight-line distance from the camera to the chunk's square, sideways.
+                let min_x = ((i % CHUNKS_X) * CHUNK) as f32;
+                let min_z = ((i / CHUNKS_X) * CHUNK) as f32;
+                let dx = (min_x - eye.x).max(eye.x - (min_x + CHUNK as f32)).max(0.0);
+                let dz = (min_z - eye.z).max(eye.z - (min_z + CHUNK as f32)).max(0.0);
+                if dx * dx + dz * dz > DRAW_DISTANCE * DRAW_DISTANCE {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
 
             if self.enemy_index_count > 0 {
                 pass.set_pipeline(&self.block_pipeline);

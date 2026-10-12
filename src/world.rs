@@ -1,8 +1,15 @@
 use bytemuck::{Pod, Zeroable};
+
+use crate::biome::{self, Biome};
 use glam::Vec3;
 
-pub const SIZE_X: usize = 512;
-pub const SIZE_Z: usize = 512;
+pub const SIZE_X: usize = 1024;
+pub const SIZE_Z: usize = 1024;
+
+/// The world is meshed in square chunks of this many columns, so an edit only rebuilds one.
+pub const CHUNK: usize = 32;
+pub const CHUNKS_X: usize = SIZE_X / CHUNK;
+pub const CHUNKS_Z: usize = SIZE_Z / CHUNK;
 pub const SIZE_Y: usize = 64;
 
 /// Water fills every column lower than this, up to (not including) this height.
@@ -35,12 +42,22 @@ pub enum Block {
     /// A stronger forge, built on a stone floor.
     Furnace,
     HousePlant,
+    /// Desert ground.
+    Sand,
+    /// Badlands rock comes in two alternating layers.
+    RedRock,
+    Clay,
+    /// Volcanic ground.
+    Basalt,
+    /// A glowing pool surface in volcanic country.
+    Magma,
+    Cactus,
 }
 
 #[cfg(test)]
 impl Block {
     /// Every block type, for tests that check them all.
-    pub const ALL: [Block; 17] = [
+    pub const ALL: [Block; 23] = [
         Block::Air,
         Block::Grass,
         Block::Dirt,
@@ -58,6 +75,12 @@ impl Block {
         Block::Forge,
         Block::Furnace,
         Block::HousePlant,
+        Block::Sand,
+        Block::RedRock,
+        Block::Clay,
+        Block::Basalt,
+        Block::Magma,
+        Block::Cactus,
     ];
 }
 
@@ -127,8 +150,10 @@ pub struct World {
     heights: Vec<u8>,
     /// One above the highest non-air block, so meshing can skip the empty sky.
     top_y: usize,
-    /// Per column: in the snow biome.
-    cold: Vec<bool>,
+    /// Per column: which biome it is in.
+    biomes: Vec<Biome>,
+    /// Per chunk: changed since the mesh was last built.
+    dirty: Vec<bool>,
     /// Per column: water here belongs to a pond, lake or river that is entirely in the snow
     /// biome, so it is drawn as ice.
     frozen: Vec<bool>,
@@ -144,7 +169,7 @@ pub fn hash(x: u32, y: u32, seed: u32) -> f32 {
     (h & 0xFFFF) as f32 / 65535.0
 }
 
-fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
+pub(crate) fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
     let (x0, z0) = (x.floor(), z.floor());
     let (fx, fz) = (x - x0, z - z0);
     let (sx, sz) = (fx * fx * (3.0 - 2.0 * fx), fz * fz * (3.0 - 2.0 * fz));
@@ -159,7 +184,7 @@ fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
 }
 
 /// Layered noise, returns roughly 0..1.
-fn fbm_with(x: f32, z: f32, seed: u32, octaves: u32, persistence: f32, ridged: bool) -> f32 {
+pub(crate) fn fbm_with(x: f32, z: f32, seed: u32, octaves: u32, persistence: f32, ridged: bool) -> f32 {
     let (mut sum, mut amp, mut freq, mut norm) = (0.0, 1.0, 1.0, 0.0);
     for octave in 0..octaves {
         let mut n = value_noise(x * freq, z * freq, seed.wrapping_add(octave));
@@ -175,42 +200,20 @@ fn fbm_with(x: f32, z: f32, seed: u32, octaves: u32, persistence: f32, ridged: b
     sum / norm
 }
 
-fn smoothstep(t: f32) -> f32 {
+pub(crate) fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// 0 = pure grass country, 1 = pure snow country. Snow is on the east side, grass on the
-/// west, with a fairly narrow border in the middle. Noise only wobbles the border a little.
-fn snow_amount(x: usize, z: usize, seed: u32) -> f32 {
-    snow_ramp(x, z, seed, 0.5)
-}
-
-/// Same border as `snow_amount`, but the grass-to-snow ground colour changes over a much
-/// shorter distance, so the speckled mix is only a narrow strip.
-fn surface_snow(x: usize, z: usize, seed: u32) -> f32 {
-    snow_ramp(x, z, seed, 0.12)
-}
-
-/// `width` is how much the coldness changes between all grass and all snow (0.5 is a wide,
-/// slow change, 0.1 a quick one).
-fn snow_ramp(x: usize, z: usize, seed: u32, width: f32) -> f32 {
-    let (fx, fz) = (x as f32, z as f32);
-    let wobble = (fbm_with(fx / 70.0, fz / 70.0, seed ^ 0xB10E, 3, 0.4, false) - 0.5) * 0.5;
-    // Goes from about -0.25 on the west edge to 1.25 on the east edge.
-    let coldness = 0.5 + wobble + (fx / SIZE_X as f32 - 0.5) * 1.5;
-    ((coldness - 0.5) / width + 0.5).clamp(0.0, 1.0)
-}
-
 /// Low, long, gentle rolling hills.
-fn hill_height(x: f32, z: f32, seed: u32) -> f32 {
+pub(crate) fn hill_height(x: f32, z: f32, seed: u32) -> f32 {
     let n = fbm_with(x / 75.0, z / 75.0, seed, 2, 0.35, false);
     let t = ((n - 0.3) / 0.4).clamp(0.0, 1.0);
     7.0 + t * 10.0
 }
 
 /// Tall ridged ranges with peaks, separated by deep valleys.
-fn mountain_height(x: f32, z: f32, seed: u32) -> f32 {
+pub(crate) fn mountain_height(x: f32, z: f32, seed: u32) -> f32 {
     let m = fbm_with(x / 90.0, z / 90.0, seed ^ 0xA11, 3, 0.45, true);
     let t = ((m - 0.2) / 0.7).clamp(0.0, 1.0);
     3.0 + 38.0 * t.powf(1.5)
@@ -227,6 +230,57 @@ fn wetness(x: f32, z: f32, seed: u32) -> f32 {
     let lake = (fbm_with(x / 55.0, z / 55.0, seed ^ 0x1A4E, 3, 0.5, false) - 0.68) / 0.1;
     let pond = (fbm_with(x / 16.0, z / 16.0, seed ^ 0x90D, 2, 0.5, false) - 0.78) / 0.08;
     river.max(lake).max(pond).clamp(0.0, 1.0)
+}
+
+/// 1 right at the spawn point, fading to 0 forty blocks away. Keeps water off it.
+fn near_spawn(x: usize, z: usize) -> f32 {
+    let (dx, dz) = (x as f32 - (SIZE_X / 2) as f32, z as f32 - (SIZE_Z / 2) as f32);
+    1.0 - smoothstep(((dx * dx + dz * dz).sqrt() - 20.0) / 20.0)
+}
+
+/// For every column: its biome, its ground height, and how deep a water bed is dug there
+/// (`u8::MAX` for none). Worked out on every core, a band of rows each.
+fn survey(seed: u32) -> Vec<(Biome, u8, u8)> {
+    let layout = biome::Layout::new(seed);
+    let layout = &layout;
+    let mut out = vec![(Biome::Plains, 0u8, u8::MAX); SIZE_X * SIZE_Z];
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let band = SIZE_Z.div_ceil(threads) * SIZE_X;
+    std::thread::scope(|scope| {
+        for (n, part) in out.chunks_mut(band).enumerate() {
+            scope.spawn(move || {
+                for (i, cell) in part.iter_mut().enumerate() {
+                    let at = n * band + i;
+                    *cell = survey_column(layout, at % SIZE_X, at / SIZE_X, seed);
+                }
+            });
+        }
+    });
+    out
+}
+
+fn survey_column(layout: &biome::Layout, x: usize, z: usize, seed: u32) -> (Biome, u8, u8) {
+    let col = biome::column(layout, x, z, seed);
+    let (fx, fz) = (x as f32, z as f32);
+    let mut wet = 0.0;
+    if col.water > 0.0 {
+        wet = wetness(fx, fz, seed) * col.water;
+    }
+    if col.swamp > 0.0 {
+        // A third of a swamp is pond.
+        let pond = ((fbm_with(fx / 14.0, fz / 14.0, seed ^ 0x5B0C, 2, 0.5, false) - 0.56) / 0.06)
+            .clamp(0.0, 1.0);
+        wet = f32::max(wet, pond * col.swamp);
+    }
+    wet *= 1.0 - near_spawn(x, z);
+    // One block deep at the edge, up to four in the middle.
+    let bed = if wet > 0.0 {
+        (WATER_LEVEL as f32 - 1.0 - wet * 3.0).round() as u8
+    } else {
+        u8::MAX
+    };
+    let height = col.height.round().clamp(1.0, (SIZE_Y - 1) as f32) as u8;
+    (col.biome, height, bed)
 }
 
 /// Spreads `limit` outward so neighbouring columns differ by at most 1: each column ends up
@@ -312,86 +366,102 @@ pub(crate) const FACES: [Face; 6] = [
 ];
 
 impl World {
-    /// Random terrain: gentle hills in the grass zone, tall ranges in the snow zone. The same
-    /// seed always gives the same world.
+    /// Random terrain, with the biomes laid out by the climate. The same seed always gives
+    /// the same world.
     pub fn generate(seed: u32) -> World {
-        let mut blocks = vec![Block::Air; SIZE_X * SIZE_Y * SIZE_Z];
-        let mut heights = vec![0u8; SIZE_X * SIZE_Z];
-        let (spawn_x, spawn_z) = ((SIZE_X / 2) as f32, (SIZE_Z / 2) as f32);
-        // 1 right at the spawn point, fading to 0 forty blocks away. Keeps water off it.
-        let near_spawn = |x: usize, z: usize| {
-            let d = ((x as f32 - spawn_x).powi(2) + (z as f32 - spawn_z).powi(2)).sqrt();
-            1.0 - smoothstep((d - 20.0) / 20.0)
-        };
-
-        // The dry-land shape, plus the water beds carved into it.
-        let mut limit = vec![u8::MAX; SIZE_X * SIZE_Z];
-        for z in 0..SIZE_Z {
-            for x in 0..SIZE_X {
-                // Terrain shape follows the zone smoothly, so hills grow into mountains.
-                let w = smoothstep(snow_amount(x, z, seed));
-                let (fx, fz) = (x as f32, z as f32);
-                let hills = hill_height(fx, fz, seed);
-                let mountains = mountain_height(fx, fz, seed);
-                let h = (hills + (mountains - hills) * w).round() as usize;
-                heights[z * SIZE_X + x] = h.clamp(1, SIZE_Y - 1) as u8;
-
-                // Water is rarer up in the mountains, so it doesn't cut the peaks down.
-                let wet = wetness(fx, fz, seed) * (1.0 - near_spawn(x, z)) * (1.0 - 0.9 * w);
-                if wet > 0.0 {
-                    // One block deep at the edge, up to four in the middle.
-                    let bed = WATER_LEVEL as f32 - 1.0 - wet * 3.0;
-                    limit[z * SIZE_X + x] = bed.round() as u8;
-                }
-            }
-        }
+        let survey = survey(seed);
         // Land can't be steeper than a step per block next to water, so banks are walkable.
+        let mut limit: Vec<u8> = survey.iter().map(|c| c.2).collect();
         slope_limit(&mut limit);
 
+        let mut blocks = vec![Block::Air; SIZE_X * SIZE_Y * SIZE_Z];
+        let mut heights = vec![0u8; SIZE_X * SIZE_Z];
+        let mut biomes = Vec::with_capacity(SIZE_X * SIZE_Z);
         for z in 0..SIZE_Z {
             for x in 0..SIZE_X {
                 let i = z * SIZE_X + x;
+                let (biome, ground, _) = survey[i];
                 // Dry ground around the spawn point.
                 let floor = (WATER_LEVEL as f32 * near_spawn(x, z)).round() as usize;
-                let h = (heights[i].min(limit[i]) as usize).max(floor).clamp(1, SIZE_Y - 1);
+                let h = (ground.min(limit[i]) as usize).max(floor).clamp(1, SIZE_Y - 1);
                 heights[i] = h as u8;
+                biomes.push(biome);
 
-                // Beaches and lake beds are bare earth.
-                let top = if h <= WATER_LEVEL {
-                    Block::Dirt
-                } else {
-                    Self::surface_block(x, z, surface_snow(x, z, seed), seed)
-                };
-                // Snowy country has rock under the snow; grassy country has dirt.
-                let under = if top == Block::Snow { Block::Stone } else { Block::Dirt };
                 for y in 0..h {
-                    blocks[Self::index(x, y, z)] = if y + 1 == h { top } else { under };
+                    blocks[Self::index(x, y, z)] = Self::ground_block(biome, y, h);
                 }
-                for y in h..WATER_LEVEL {
-                    blocks[Self::index(x, y, z)] = Block::Water;
+                if biome != Biome::Volcanic {
+                    for y in h..WATER_LEVEL {
+                        blocks[Self::index(x, y, z)] = Block::Water;
+                    }
                 }
             }
         }
-        let cold: Vec<bool> = (0..SIZE_X * SIZE_Z)
-            .map(|i| surface_snow(i % SIZE_X, i / SIZE_X, seed) > 0.5)
-            .collect();
-        let frozen = Self::frozen_columns(&heights, &cold);
+        let cold: Vec<bool> = biomes.iter().map(|b| *b == Biome::Snow).collect();
+        let frozen = Self::frozen_columns(&heights, &biomes, &cold);
         // Trees reach about a dozen blocks above the ground.
         let top_y = (heights.iter().copied().max().unwrap_or(0) as usize + 12).min(SIZE_Y);
         let mut world = World {
             blocks,
             heights,
             top_y,
-            cold,
+            biomes,
+            dirty: vec![false; CHUNKS_X * CHUNKS_Z],
             frozen,
         };
         world.plant_trees(seed);
+        world.dirty.fill(false);
         world
     }
 
+    /// The block at height `y` in a column of this biome whose ground is `h` high.
+    fn ground_block(biome: Biome, y: usize, h: usize) -> Block {
+        let top = y + 1 == h;
+        match biome {
+            Biome::Volcanic => {
+                if top && h <= 8 {
+                    Block::Magma
+                } else {
+                    Block::Basalt
+                }
+            }
+            // Beaches and lake beds.
+            _ if h <= WATER_LEVEL => {
+                if biome == Biome::Desert {
+                    Block::Sand
+                } else {
+                    Block::Dirt
+                }
+            }
+            Biome::Plains | Biome::Meadow | Biome::Forest | Biome::Swamp => {
+                if top {
+                    Block::Grass
+                } else {
+                    Block::Dirt
+                }
+            }
+            Biome::Desert => Block::Sand,
+            // Alternating bands of red rock and clay.
+            Biome::Badlands => {
+                if (y / 2) % 3 == 1 {
+                    Block::Clay
+                } else {
+                    Block::RedRock
+                }
+            }
+            Biome::Snow => {
+                if top {
+                    Block::Snow
+                } else {
+                    Block::Stone
+                }
+            }
+        }
+    }
+
     /// Marks the columns of every body of water that lies completely inside the snow biome.
-    fn frozen_columns(heights: &[u8], cold: &[bool]) -> Vec<bool> {
-        let wet = |i: usize| (heights[i] as usize) < WATER_LEVEL;
+    fn frozen_columns(heights: &[u8], biomes: &[Biome], cold: &[bool]) -> Vec<bool> {
+        let wet = |i: usize| (heights[i] as usize) < WATER_LEVEL && biomes[i] != Biome::Volcanic;
         let mut frozen = vec![false; heights.len()];
         let mut seen = vec![false; heights.len()];
         for start in 0..heights.len() {
@@ -434,13 +504,46 @@ impl World {
         frozen
     }
 
-    /// Whether the column is in the snow biome.
-    pub fn is_cold(&self, x: i32, z: i32) -> bool {
-        x >= 0
-            && z >= 0
-            && x < SIZE_X as i32
-            && z < SIZE_Z as i32
-            && self.cold[z as usize * SIZE_X + x as usize]
+    /// The biome of the column at (x, z); outside the world it is whatever is nearest.
+    pub fn biome(&self, x: i32, z: i32) -> Biome {
+        let x = x.clamp(0, SIZE_X as i32 - 1) as usize;
+        let z = z.clamp(0, SIZE_Z as i32 - 1) as usize;
+        self.biomes[z * SIZE_X + x]
+    }
+
+    /// Notes that the mesh of the chunk holding column (x, z) is out of date, and of the
+    /// next chunk over if the column is on the edge (faces there depend on it).
+    fn mark_dirty(&mut self, x: i32, z: i32) {
+        if x < 0 || z < 0 || x >= SIZE_X as i32 || z >= SIZE_Z as i32 {
+            return;
+        }
+        let (x, z) = (x as usize, z as usize);
+        let (cx, cz) = (x / CHUNK, z / CHUNK);
+        self.dirty[cz * CHUNKS_X + cx] = true;
+        if x % CHUNK == 0 && cx > 0 {
+            self.dirty[cz * CHUNKS_X + cx - 1] = true;
+        }
+        if x % CHUNK == CHUNK - 1 && cx + 1 < CHUNKS_X {
+            self.dirty[cz * CHUNKS_X + cx + 1] = true;
+        }
+        if z % CHUNK == 0 && cz > 0 {
+            self.dirty[(cz - 1) * CHUNKS_X + cx] = true;
+        }
+        if z % CHUNK == CHUNK - 1 && cz + 1 < CHUNKS_Z {
+            self.dirty[(cz + 1) * CHUNKS_X + cx] = true;
+        }
+    }
+
+    /// The chunks (x, z) whose meshes need rebuilding since the last call.
+    pub fn take_dirty(&mut self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (i, flag) in self.dirty.iter_mut().enumerate() {
+            if *flag {
+                *flag = false;
+                out.push((i % CHUNKS_X, i / CHUNKS_X));
+            }
+        }
+        out
     }
 
     fn set_if_air(&mut self, x: i32, y: i32, z: i32, block: Block) {
@@ -452,17 +555,30 @@ impl World {
         if self.blocks[i] == Block::Air {
             self.blocks[i] = block;
             self.top_y = self.top_y.max(y as usize + 1);
+            self.mark_dirty(x, z);
         }
     }
 
-    /// Oaks on grass (common), pines on snow (rarer, and rarer still as the ground gets high).
-    /// Each cell of a coarse grid gets at most one tree, which keeps trees from piling up.
+    /// Oaks on grass (forests have the most, then plains, meadows hardly any), bare dead trunks in swamps, pines
+    /// on snow (rarer, and rarer still as the ground gets high) and cacti on sand. Each cell
+    /// of a coarse grid gets at most one plant, which keeps them from piling up.
     fn plant_trees(&mut self, seed: u32) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Plant {
+            Oak,
+            Pine,
+            Cactus,
+        }
         let (spawn_x, spawn_z) = (SIZE_X / 2, SIZE_Z / 2);
-        for (cell, is_pine) in [(5usize, false), (7usize, true)] {
+        let passes = [(5usize, Plant::Oak), (7, Plant::Pine), (7, Plant::Cactus)];
+        for (cell, plant) in passes {
+            let salt = match plant {
+                Plant::Oak => 0x0A4B,
+                Plant::Pine => 0x71AE,
+                Plant::Cactus => 0xCAC7,
+            };
             for cz in 0..SIZE_Z / cell {
                 for cx in 0..SIZE_X / cell {
-                    let salt = if is_pine { 0x71AE } else { 0x0A4B };
                     let (cx32, cz32) = (cx as u32, cz as u32);
                     let x = cx * cell + (hash(cx32, cz32, seed ^ salt) * cell as f32) as usize;
                     let z = cz * cell + (hash(cx32, cz32, seed ^ salt ^ 1) * cell as f32) as usize;
@@ -475,23 +591,53 @@ impl World {
                     }
                     let ground = self.heights[z * SIZE_X + x] as i32;
                     let top = self.get(x as i32, ground - 1, z as i32);
+                    let biome = self.biomes[z * SIZE_X + x];
                     let roll = hash(cx32, cz32, seed ^ salt ^ 2);
                     let size_roll = hash(cx32, cz32, seed ^ salt ^ 3);
                     let (x, z) = (x as i32, z as i32);
-                    if is_pine {
-                        if top != Block::Snow {
-                            continue;
+                    match plant {
+                        Plant::Pine => {
+                            if top != Block::Snow {
+                                continue;
+                            }
+                            // Full chance on low ground, fading to none by height 30.
+                            let high = ((ground as f32 - 12.0) / 18.0).clamp(0.0, 1.0);
+                            if roll < 0.55 * (1.0 - high) {
+                                self.plant_pine(x, ground, z, size_roll);
+                            }
                         }
-                        // Full chance on low ground, fading to none by height 30.
-                        let high = ((ground as f32 - 12.0) / 18.0).clamp(0.0, 1.0);
-                        if roll < 0.55 * (1.0 - high) {
-                            self.plant_pine(x, ground, z, size_roll);
+                        Plant::Oak if top == Block::Grass => {
+                            let chance = match biome {
+                                Biome::Forest => 0.5,
+                                Biome::Plains => 0.35,
+                                Biome::Meadow => 0.05,
+                                Biome::Swamp => 0.12,
+                                _ => 0.0,
+                            };
+                            if roll < chance {
+                                if biome == Biome::Swamp {
+                                    self.plant_dead_tree(x, ground, z, size_roll);
+                                } else {
+                                    self.plant_oak(x, ground, z, size_roll);
+                                }
+                            }
                         }
-                    } else if top == Block::Grass && roll < 0.6 {
-                        self.plant_oak(x, ground, z, size_roll);
+                        Plant::Cactus if top == Block::Sand && roll < 0.25 => {
+                            for dy in 0..1 + (size_roll * 3.0) as i32 {
+                                self.set_if_air(x, ground + dy, z, Block::Cactus);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
+        }
+    }
+
+    /// A bare trunk, 3 to 5 tall, for swamps.
+    fn plant_dead_tree(&mut self, x: i32, ground: i32, z: i32, size_roll: f32) {
+        for dy in 0..3 + (size_roll * 3.0) as i32 {
+            self.set_if_air(x, ground + dy, z, Block::Log);
         }
     }
 
@@ -578,19 +724,6 @@ impl World {
         }
     }
 
-    /// Picks grass or snow for a column. The jitter makes the border a speckled mix.
-    fn surface_block(x: usize, z: usize, snow: f32, seed: u32) -> Block {
-        let (fx, fz) = (x as f32, z as f32);
-        let jitter = 0.6 * hash(x as u32, z as u32, seed ^ 0x5EED)
-            + 0.4 * value_noise(fx / 5.0, fz / 5.0, seed ^ 0x5EED)
-            - 0.5;
-        if snow + jitter * 0.5 > 0.5 {
-            Block::Snow
-        } else {
-            Block::Grass
-        }
-    }
-
     fn index(x: usize, y: usize, z: usize) -> usize {
         (y * SIZE_Z + z) * SIZE_X + x
     }
@@ -616,6 +749,11 @@ impl World {
     /// count: that is solid.
     pub fn in_water(&self, p: Vec3) -> bool {
         self.is_liquid(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+    }
+
+    /// Is this cell a block of ice: water in a body that is frozen over?
+    pub fn is_ice(&self, x: i32, y: i32, z: i32) -> bool {
+        self.get(x, y, z) == Block::Water && self.frozen[z as usize * SIZE_X + x as usize]
     }
 
     /// Water that isn't frozen over.
@@ -764,6 +902,7 @@ impl World {
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
         self.top_y = self.top_y.max(y as usize + 1);
+        self.mark_dirty(x, z);
         true
     }
 
@@ -773,6 +912,7 @@ impl World {
             return false;
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
+        self.mark_dirty(x, z);
         true
     }
 
@@ -784,12 +924,14 @@ impl World {
             return None;
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = Block::Air;
+        self.mark_dirty(x, z);
         self.flow_into(x, y, z);
         Some(block)
     }
 
     fn set_cell(&mut self, x: i32, y: i32, z: i32, block: Block) {
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
+        self.mark_dirty(x, z);
     }
 
     /// A cell that was just dug out fills with water if there is water above it or beside
@@ -921,13 +1063,29 @@ impl World {
         Vec3::new(x as f32 + 0.5, h + 0.01, z as f32 + 0.5)
     }
 
-    /// Builds one mesh containing only the block faces that touch air.
+    /// Every chunk's mesh in one (for tests).
+    #[cfg(test)]
     pub fn build_mesh(&self) -> (Vec<Vertex>, Vec<u32>) {
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        for cz in 0..CHUNKS_Z {
+            for cx in 0..CHUNKS_X {
+                let (v, i) = self.build_chunk(cx, cz);
+                let base = vertices.len() as u32;
+                vertices.extend(v);
+                indices.extend(i.into_iter().map(|n| n + base));
+            }
+        }
+        (vertices, indices)
+    }
+
+    /// Builds the mesh of one chunk of columns, containing only the block faces that touch air.
+    pub fn build_chunk(&self, cx: usize, cz: usize) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let (x0, z0) = ((cx * CHUNK) as i32, (cz * CHUNK) as i32);
         for y in 0..self.top_y.min(SIZE_Y) as i32 {
-            for z in 0..SIZE_Z as i32 {
-                for x in 0..SIZE_X as i32 {
+            for z in z0..z0 + CHUNK as i32 {
+                for x in x0..x0 + CHUNK as i32 {
                     let block = self.get(x, y, z);
                     if block == Block::Air {
                         continue;
@@ -957,7 +1115,11 @@ impl World {
                         if face.kind == 2 && y == 0 {
                             continue; // never visible
                         }
+                        let biome = self.biomes[z as usize * SIZE_X + x as usize];
                         let layer = match (block, face.kind) {
+                            (Block::Grass, 0) if biome == Biome::Meadow => 41.0,
+                            (Block::Grass, 0) if biome == Biome::Swamp => 42.0,
+                            (Block::Dirt, _) if biome == Biome::Swamp => 43.0,
                             (Block::Grass, 0) => 0.0,
                             (Block::Grass, 1) => 1.0,
                             (Block::Snow, 0) => 3.0,
@@ -977,6 +1139,12 @@ impl World {
                             (Block::StoneFloor, _) => 26.0,
                             (Block::Forge, _) => 27.0,
                             (Block::Furnace, _) => 29.0,
+                            (Block::Sand, _) => 35.0,
+                            (Block::RedRock, _) => 36.0,
+                            (Block::Clay, _) => 37.0,
+                            (Block::Basalt, _) => 38.0,
+                            (Block::Magma, _) => 39.0,
+                            (Block::Cactus, _) => 40.0,
                             _ => 2.0,
                         };
                         let base = vertices.len() as u32;
@@ -1003,47 +1171,141 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hills_are_low_and_gentle_and_mountains_are_tall() {
+    fn plains_are_gentle_and_snow_country_has_tall_mountains_and_deep_valleys() {
         for seed in [1, 2, 3, 99] {
             let w = World::generate(seed);
             let column = |x: usize, z: usize| w.heights[z * SIZE_X + x] as i32;
-            let (mut hill_max, mut mountain_max, mut mountain_min) = (0, 0, i32::MAX);
+            let is = |x: usize, z: usize, b: Biome| w.biomes[z * SIZE_X + x] == b;
+            let (mut pairs, mut cliffs) = (0u32, 0u32);
+            let (mut plains_max, mut snow_max, mut snow_min) = (0, 0, i32::MAX);
             for z in 0..SIZE_Z - 1 {
                 for x in 0..SIZE_X - 1 {
-                    if x < SIZE_X / 3 {
-                        hill_max = hill_max.max(column(x, z));
-                        // No cliffs in the hills: every step can be hopped up.
-                        assert!((column(x, z) - column(x + 1, z)).abs() <= 1);
-                        assert!((column(x, z) - column(x, z + 1)).abs() <= 1);
-                    } else if x >= SIZE_X * 2 / 3 {
-                        mountain_max = mountain_max.max(column(x, z));
-                        mountain_min = mountain_min.min(column(x, z));
+                    if is(x, z, Biome::Plains) {
+                        plains_max = plains_max.max(column(x, z));
+                        for (nx, nz) in [(x + 1, z), (x, z + 1)] {
+                            if is(nx, nz, Biome::Plains) {
+                                pairs += 1;
+                                cliffs += ((column(x, z) - column(nx, nz)).abs() > 1) as u32;
+                            }
+                        }
+                    } else if is(x, z, Biome::Snow) {
+                        snow_max = snow_max.max(column(x, z));
+                        snow_min = snow_min.min(column(x, z));
                     }
                 }
             }
-            assert!(hill_max <= 22, "hills too tall: {hill_max}");
-            assert!(mountain_max >= 30, "mountains too short: {mountain_max}");
-            assert!(mountain_min <= 6, "valleys too shallow: {mountain_min}");
+            // The plains are walkable (a step can be hopped up), apart from the odd spot where
+            // they meet another biome.
+            assert!(cliffs * 100 <= pairs, "{cliffs} steps over 1 in {pairs} (seed {seed})");
+            assert!(plains_max <= 30, "plains too tall: {plains_max}");
+            assert!(snow_max >= 30, "mountains too short: {snow_max}");
+            assert!(snow_min <= 8, "valleys too shallow: {snow_min}");
         }
     }
 
     #[test]
-    fn has_grass_snow_and_a_mixed_border() {
+    fn every_biome_exists_and_the_world_starts_on_plains() {
         for seed in [1, 2, 3, 99] {
             let w = World::generate(seed);
-            let mut snow_per_third = [0; 3];
-            for z in 0..SIZE_Z {
-                for x in 0..SIZE_X {
-                    let top = w.heights[z * SIZE_X + x] as i32 - 1;
-                    if w.get(x as i32, top, z as i32) == Block::Snow {
-                        snow_per_third[x * 3 / SIZE_X] += 1;
+            for biome in Biome::ALL {
+                let n = w.biomes.iter().filter(|b| **b == biome).count();
+                assert!(n > SIZE_X * SIZE_Z / 100, "{biome:?} is only {n} columns (seed {seed})");
+            }
+            let s = w.spawn_point();
+            assert_eq!(w.biome(s.x as i32, s.z as i32), Biome::Plains);
+        }
+    }
+
+    #[test]
+    fn biomes_are_big_regions_not_strips_or_specks() {
+        // Sample the world every 16 blocks and flood out each biome's regions.
+        const STEP: usize = 16;
+        let (nx, nz) = (SIZE_X / STEP, SIZE_Z / STEP);
+        for seed in [1, 2, 3, 99] {
+            let w = World::generate(seed);
+            let at = |i: usize| w.biomes[(i / nx * STEP) * SIZE_X + (i % nx) * STEP];
+            let mut seen = vec![false; nx * nz];
+            let mut small = 0;
+            for start in 0..nx * nz {
+                if seen[start] {
+                    continue;
+                }
+                let biome = at(start);
+                let mut stack = vec![start];
+                seen[start] = true;
+                let (mut size, mut on_edge) = (0, false);
+                while let Some(i) = stack.pop() {
+                    size += 1;
+                    let (x, z) = (i % nx, i / nx);
+                    on_edge |= x == 0 || z == 0 || x + 1 == nx || z + 1 == nz;
+                    let mut next = Vec::new();
+                    if x > 0 { next.push(i - 1); }
+                    if x + 1 < nx { next.push(i + 1); }
+                    if z > 0 { next.push(i - nx); }
+                    if z + 1 < nz { next.push(i + nx); }
+                    for n in next {
+                        if !seen[n] && at(n) == biome {
+                            seen[n] = true;
+                            stack.push(n);
+                        }
+                    }
+                }
+                // Under about 120 blocks across. A scrap on the map's edge is just a region
+                // cut off by it, and a single sample is a speckle of a border.
+                if size < 50 && size > 3 && !on_edge {
+                    small += size;
+                }
+            }
+            assert!(small * 100 < nx * nz, "{small} of {} samples in small regions (seed {seed})", nx * nz);
+        }
+    }
+
+    #[test]
+    fn each_biome_has_its_own_ground_and_plants() {
+        let w = World::generate(1);
+        let mut seen: Vec<(Biome, Block)> = Vec::new();
+        for z in 0..SIZE_Z {
+            for x in 0..SIZE_X {
+                let h = w.heights[z * SIZE_X + x] as i32;
+                if h > WATER_LEVEL as i32 {
+                    let pair = (w.biomes[z * SIZE_X + x], w.get(x as i32, h - 1, z as i32));
+                    if !seen.contains(&pair) {
+                        seen.push(pair);
                     }
                 }
             }
-            assert!(snow_per_third[0] < snow_per_third[2], "{snow_per_third:?}");
-            assert!(snow_per_third[2] > 1000, "{snow_per_third:?}");
-            assert!(snow_per_third[0] < SIZE_X * SIZE_Z / 3 - 1000, "{snow_per_third:?}");
         }
+        for pair in [
+            (Biome::Desert, Block::Sand),
+            (Biome::Badlands, Block::RedRock),
+            (Biome::Badlands, Block::Clay),
+            (Biome::Volcanic, Block::Basalt),
+            (Biome::Volcanic, Block::Magma),
+            (Biome::Snow, Block::Snow),
+            (Biome::Forest, Block::Grass),
+        ] {
+            assert!(seen.contains(&pair), "{pair:?}");
+        }
+        // Cacti only on sand, and dead swamp trunks without leaves.
+        let count = |block| w.blocks.iter().filter(|b| **b == block).count();
+        assert!(count(Block::Cactus) > 100, "cacti: {}", count(Block::Cactus));
+        // No water on volcanoes, and hardly any in deserts (only where a river from outside
+        // laps over the border).
+        let (mut desert, mut desert_wet) = (0, 0);
+        for z in 0..SIZE_Z {
+            for x in 0..SIZE_X {
+                let wet = w.get(x as i32, WATER_LEVEL as i32 - 1, z as i32) == Block::Water;
+                match w.biomes[z * SIZE_X + x] {
+                    Biome::Volcanic => assert!(!wet),
+                    Biome::Desert => {
+                        desert += 1;
+                        desert_wet += wet as u32;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(desert_wet * 20 < desert, "{desert_wet} wet columns of {desert} desert");
     }
 
     #[test]
@@ -1084,7 +1346,7 @@ mod tests {
             assert!(oaks > pines * 2, "oaks {oaks} pines {pines}");
             assert!(pines > 20, "pines {pines}");
             let density = |b: [u32; 2]| b[0] as f32 / b[1].max(1) as f32;
-            assert!(density(high) < density(low) * 0.3, "low {low:?} high {high:?}");
+            assert!(density(high) < density(low) * 0.5, "low {low:?} high {high:?}");
             // Spawn is clear.
             let s = w.spawn_point();
             assert_eq!(w.get(s.x as i32, s.y as i32, s.z as i32), Block::Air);

@@ -1,4 +1,5 @@
 mod app;
+mod biome;
 mod combat;
 mod effects;
 mod enemy;

@@ -1,6 +1,7 @@
 //! One frame: update everything, then draw.
 
 use super::*;
+use crate::biome::Biome;
 
 impl App {
     /// Runs one frame: moves the player, mining, the fight, weather and background
@@ -19,14 +20,17 @@ impl App {
         // One crack stage, halfway through the mining time.
         let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
         let (px, pz) = (self.player.pos.x.floor() as i32, self.player.pos.z.floor() as i32);
-        self.weather.snowing = self.world.is_cold(px, pz);
+        self.weather.biome = self.world.biome(px, pz);
+        self.weather.snowing = self.weather.biome == Biome::Snow;
         self.weather.underwater = self.world.in_water(self.player.eye());
         self.weather.update(dt);
         if let Some(music) = &mut self.music {
             // Rain you hear is snow in the cold; either way it is as loud as the rain is.
             let amount = self.weather.params.rain;
             let snowing = self.weather.snowing;
-            music.set_weather(if snowing { 0.0 } else { amount }, if snowing { amount } else { 0.0 }, dt);
+            let creepy = matches!(self.weather.biome, Biome::Volcanic | Biome::Swamp);
+            let (rain, snow) = if snowing { (0.0, amount) } else { (amount, 0.0) };
+            music.update(rain, snow, if creepy { 1.0 } else { 0.0 }, dt);
         }
 
         let conversion_boost = self.update_background(dt);

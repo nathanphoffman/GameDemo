@@ -99,8 +99,15 @@ impl ApplicationHandler for App {
                 )
                 .unwrap(),
         );
-        let (vertices, indices) = self.world.build_mesh();
-        self.gfx = Some(Gfx::new(window, &vertices, &indices));
+        let mut gfx = Gfx::new(window);
+        for cz in 0..world::CHUNKS_Z {
+            for cx in 0..world::CHUNKS_X {
+                let (vertices, indices) = self.world.build_chunk(cx, cz);
+                gfx.set_chunk(cx, cz, &vertices, &indices);
+            }
+        }
+        self.world.take_dirty();
+        self.gfx = Some(gfx);
         self.grab_cursor();
         self.last_frame = Instant::now();
     }

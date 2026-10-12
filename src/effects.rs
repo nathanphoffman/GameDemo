@@ -96,13 +96,28 @@ pub fn cycle_selection(current: Option<usize>, forward: bool) -> Option<usize> {
 pub fn burnable(block: Block) -> bool {
     matches!(
         block,
-        Block::Grass | Block::Leaves | Block::PineLeaves | Block::Log | Block::PineLog
+        Block::Grass
+            | Block::Leaves
+            | Block::PineLeaves
+            | Block::Log
+            | Block::PineLog
+            | Block::Cactus
     )
 }
 
 /// The natural ground, which a wooden floor can be laid over.
 pub fn is_ground(block: Block) -> bool {
-    matches!(block, Block::Grass | Block::Dirt | Block::Snow | Block::Stone)
+    matches!(
+        block,
+        Block::Grass
+            | Block::Dirt
+            | Block::Snow
+            | Block::Stone
+            | Block::Sand
+            | Block::RedRock
+            | Block::Clay
+            | Block::Basalt
+    )
 }
 
 /// What applying a dense resource (`dense_kind`: 0 = grey ... 4 = black) to `block` does, going
@@ -190,7 +205,7 @@ mod tests {
             (WOOD, WoodFloor, Effect::BuildStairs),
         ];
         // Wood lays a floor over any natural ground.
-        for ground in [Grass, Dirt, Snow, Stone] {
+        for ground in [Grass, Dirt, Snow, Stone, Sand, RedRock, Clay, Basalt] {
             table.push((WOOD, ground, Effect::LayFloor));
         }
         for kind in 0..5 {

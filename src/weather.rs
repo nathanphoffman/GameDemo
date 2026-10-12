@@ -1,5 +1,6 @@
 use glam::Vec3;
 
+use crate::biome::Biome;
 use crate::world::{hash, Vertex};
 
 /// Seconds of gameplay between weather checks.
@@ -21,15 +22,18 @@ pub enum Kind {
     LightRain,
     HeavyRain,
     Windy,
+    /// A light haze, mostly in swamps and on volcanoes.
+    Mist,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [
+    pub const ALL: [Kind; 6] = [
         Kind::Sunny,
         Kind::Fog,
         Kind::LightRain,
         Kind::HeavyRain,
         Kind::Windy,
+        Kind::Mist,
     ];
 
     /// Shown in the corner of the screen.
@@ -40,6 +44,7 @@ impl Kind {
             Kind::LightRain => "RAIN",
             Kind::HeavyRain => "HEAVY RAIN",
             Kind::Windy => "WINDY",
+            Kind::Mist => "MIST",
         }
     }
 
@@ -51,6 +56,7 @@ impl Kind {
             Kind::LightRain => (40.0, 170.0, 0.7, 0.2, 0.45, 0.4),
             Kind::HeavyRain => (20.0, 110.0, 1.0, 0.4, 1.0, 0.8),
             Kind::Windy => (70.0, 230.0, 0.2, 0.0, 0.0, 1.0),
+            Kind::Mist => (20.0, 130.0, 0.3, 0.1, 0.0, 0.15),
         };
         Params {
             fog_start,
@@ -101,6 +107,8 @@ pub struct Weather {
     pub cloud_offset: [f32; 2],
     /// The player is in the cold biome, where rain falls as snow. Set by the game each frame.
     pub snowing: bool,
+    /// The biome the player is in. Set by the game each frame.
+    pub biome: Biome,
     /// The camera is under water, so the scene is drawn blue. Set by the game each frame.
     pub underwater: bool,
     clock: f32,
@@ -120,6 +128,7 @@ impl Weather {
             params: Kind::Sunny.params(),
             cloud_offset: [0.0, 0.0],
             snowing: false,
+            biome: Biome::Plains,
             underwater: false,
             clock: 0.0,
             check_interval,
@@ -130,10 +139,23 @@ impl Weather {
 
     /// Shown in the corner of the screen: the kind's name, with rain called snow in the cold.
     pub fn label(&self) -> &'static str {
-        match (self.kind, self.snowing) {
+        match (self.effective_kind(), self.snowing) {
             (Kind::LightRain, true) => "SNOW",
             (Kind::HeavyRain, true) => "HEAVY SNOW",
             (kind, _) => kind.label(),
+        }
+    }
+
+    /// The weather that actually reaches the player: the world's weather, bent by the biome.
+    /// Deserts turn rain into dust storms, swamps and volcanoes are hazy, forests are wetter.
+    pub fn effective_kind(&self) -> Kind {
+        match (self.biome, self.kind) {
+            (Biome::Desert, Kind::LightRain | Kind::HeavyRain) => Kind::Windy,
+            (Biome::Desert, Kind::Fog | Kind::Mist) => Kind::Sunny,
+            (Biome::Swamp | Biome::Volcanic, Kind::Sunny) => Kind::Mist,
+            (Biome::Volcanic, Kind::LightRain | Kind::HeavyRain) => Kind::Fog,
+            (Biome::Forest, Kind::Fog | Kind::Mist) => Kind::LightRain,
+            (_, kind) => kind,
         }
     }
 
@@ -166,7 +188,7 @@ impl Weather {
 
         let rate = 3.0 / BLEND_SECONDS; // 1 - e^-3 is about 95%
         let amount = (dt * rate).min(1.0);
-        self.params = self.params.toward(self.kind.params(), amount);
+        self.params = self.params.toward(self.effective_kind().params(), amount);
 
         let speed = 1.0 + 6.0 * self.params.wind;
         self.cloud_offset[0] += BASE_DRIFT[0] * speed * dt;

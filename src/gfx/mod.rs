@@ -14,7 +14,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::{enemy};
-use crate::world::{Vertex, World};
+use crate::world::{Vertex, World, CHUNKS_X};
 
 pub(crate) const FOV_Y_DEGREES: f32 = 80.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -74,6 +74,15 @@ fn make_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Text
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// How far away chunks are still drawn, in blocks. Past the longest fog it is all haze.
+const DRAW_DISTANCE: f32 = 280.0;
+
+struct ChunkMesh {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+}
+
 pub(crate) struct Gfx {
     pub(crate) window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -100,9 +109,8 @@ pub(crate) struct Gfx {
     enemy_vertices: wgpu::Buffer,
     enemy_indices: wgpu::Buffer,
     enemy_index_count: u32,
-    mesh_vertices: wgpu::Buffer,
-    mesh_indices: wgpu::Buffer,
-    mesh_index_count: u32,
+    /// The world, one mesh per chunk (None while a chunk has nothing to draw).
+    chunks: Vec<Option<ChunkMesh>>,
     hud_buf: wgpu::Buffer,
 }
 
@@ -147,12 +155,12 @@ impl Gfx {
         }
     }
 
-    /// Replaces the world mesh, e.g. after a block was mined.
-    pub(crate) fn update_mesh(&mut self, vertices: &[Vertex], indices: &[u32]) {
-        self.mesh_vertices =
-            init_buffer(&self.device, "mesh vertices", vertices, wgpu::BufferUsages::VERTEX);
-        self.mesh_indices =
-            init_buffer(&self.device, "mesh indices", indices, wgpu::BufferUsages::INDEX);
-        self.mesh_index_count = indices.len() as u32;
+    /// Replaces the mesh of one chunk, e.g. after a block in it was mined.
+    pub(crate) fn set_chunk(&mut self, cx: usize, cz: usize, vertices: &[Vertex], indices: &[u32]) {
+        self.chunks[cz * CHUNKS_X + cx] = (!indices.is_empty()).then(|| ChunkMesh {
+            vertices: init_buffer(&self.device, "chunk vertices", vertices, wgpu::BufferUsages::VERTEX),
+            indices: init_buffer(&self.device, "chunk indices", indices, wgpu::BufferUsages::INDEX),
+            index_count: indices.len() as u32,
+        });
     }
 }

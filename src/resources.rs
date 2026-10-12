@@ -39,6 +39,10 @@ impl Resources {
             | Block::Furnace
             | Block::HousePlant => (0, 0, 0, 0, 0),
             Block::Dirt | Block::Stone => (1, 0, 0, 0, 0),
+            Block::Sand | Block::RedRock | Block::Clay | Block::Basalt => (1, 0, 0, 0, 0),
+            // Cooled magma still has some fuel in it.
+            Block::Magma => (1, 0, 0, 0, 1),
+            Block::Cactus => (0, 0, 2, 0, 0),
             Block::Grass => (1, 0, 1, 0, 0),
             Block::Snow => (1, 1, 0, 0, 0),
             Block::Log => (0, 0, 0, 1, 0),

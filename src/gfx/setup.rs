@@ -6,6 +6,7 @@ use winit::window::Window;
 
 use super::pipelines::create_pipelines;
 use super::texture::upload_block_textures;
+use crate::world::{CHUNKS_X, CHUNKS_Z};
 use super::{dynamic_vertex_buffer, init_buffer, make_depth_view, Gfx, Globals};
 use crate::hud::{HudVertex, MAX_HUD_VERTICES};
 use crate::world::{Vertex, World};
@@ -109,7 +110,7 @@ fn create_bind_group(
 }
 
 impl Gfx {
-    pub(crate) fn new(window: Arc<Window>, vertices: &[Vertex], indices: &[u32]) -> Self {
+    pub(crate) fn new(window: Arc<Window>) -> Self {
         let (surface, device, queue, config) = create_device(&window);
         let depth_view = make_depth_view(&device, config.width, config.height);
         let (texture_view, sampler) = upload_block_textures(&device, &queue);
@@ -126,8 +127,6 @@ impl Gfx {
         const VERTEX_COPY: wgpu::BufferUsages =
             wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_DST);
         let index = wgpu::BufferUsages::INDEX;
-        let mesh_vertices = init_buffer(&device, "mesh vertices", vertices, wgpu::BufferUsages::VERTEX);
-        let mesh_indices = init_buffer(&device, "mesh indices", indices, index);
         let (overlay_vertices, overlay_indices) = World::block_overlay(0, 0, 0, 10.0);
         let crack_vertices = init_buffer(&device, "crack vertices", &overlay_vertices, VERTEX_COPY);
         let crack_indices = init_buffer(&device, "crack indices", &overlay_indices, index);
@@ -173,9 +172,7 @@ impl Gfx {
             enemy_vertices,
             enemy_indices,
             enemy_index_count: 0,
-            mesh_vertices,
-            mesh_indices,
-            mesh_index_count: indices.len() as u32,
+            chunks: (0..CHUNKS_X * CHUNKS_Z).map(|_| None).collect(),
             hud_buf,
         }
     }

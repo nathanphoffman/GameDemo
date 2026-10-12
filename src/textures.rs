@@ -1,7 +1,7 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 35; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 44; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
@@ -9,7 +9,8 @@ pub const LAYERS: u32 = 35; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 
                             // 18 deer fur, 19 deer face, 20 pine bark, 21 pine log top,
                             // 22 fire, 23 coal, 24 water,
                             // 25 wood floor, 26 stone floor, 27 forge, 28 flower pot, 29 furnace, 30 potting soil,
-                            // 31 plant leaves, 32 rain, 33 wind, 34 ice
+                            // 31 plant leaves, 32 rain, 33 wind, 34 ice, 35 sand, 36 red rock, 37 clay, 38 basalt,
+                            // 39 magma, 40 cactus, 41 meadow grass top, 42 swamp grass top, 43 mud
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -209,6 +210,49 @@ fn tile(layer: u32) -> Vec<u8> {
                         [(165.0 * k) as u8, (210.0 * k) as u8, (240.0 * k).min(255.0) as u8, 255]
                     }
                 }
+                // Sand, red rock and clay: warm, lightly speckled.
+                35 => shaded([222.0, 204.0, 140.0], x, y, 90),
+                36 => shaded([168.0, 78.0, 44.0], x, y, 91),
+                37 => shaded([214.0, 160.0, 110.0], x, y, 92),
+                // Basalt: nearly black, cool grey.
+                38 => shaded([52.0, 50.0, 58.0], x, y, 93),
+                // Magma: glowing orange with dark crust.
+                39 => {
+                    let t = hash(x, y, 94) * 0.6 + hash(x / 2, y / 2, 95) * 0.4;
+                    if t > 0.68 {
+                        [40, 20, 16, 255]
+                    } else if t > 0.4 {
+                        [255, 130, 25, 255]
+                    } else {
+                        [255, 205, 70, 255]
+                    }
+                }
+                // Cactus: green with pale spines in rows.
+                40 => {
+                    if x % 4 == 1 && y % 3 == 0 {
+                        [235, 235, 190, 255]
+                    } else if x % 4 == 0 {
+                        shaded([40.0, 110.0, 56.0], x, y, 96)
+                    } else {
+                        shaded([62.0, 146.0, 74.0], x, y, 97)
+                    }
+                }
+                // Meadow grass: grass with flowers sprinkled over it.
+                41 => {
+                    let flower = hash(x, y, 98);
+                    if flower > 0.93 {
+                        [250, 250, 245, 255]
+                    } else if flower > 0.88 {
+                        [245, 205, 60, 255]
+                    } else if flower > 0.84 {
+                        [220, 90, 150, 255]
+                    } else {
+                        shaded([100.0, 165.0, 55.0], x, y, 99)
+                    }
+                }
+                // Swamp grass and mud: dark and wet.
+                42 => shaded([66.0, 92.0, 48.0], x, y, 100),
+                43 => shaded([84.0, 70.0, 52.0], x, y, 101),
                 // Wooden floor: horizontal planks with dark seams.
                 25 => {
                     let plank = y / 4;

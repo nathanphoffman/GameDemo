@@ -130,11 +130,13 @@ impl App {
         }
     }
 
-    /// Sends the world's current blocks to the GPU.
+    /// Sends the chunks of the world that changed to the GPU.
     pub(crate) fn rebuild_mesh(&mut self) {
-        let (vertices, indices) = self.world.build_mesh();
-        if let Some(gfx) = &mut self.gfx {
-            gfx.update_mesh(&vertices, &indices);
+        for (cx, cz) in self.world.take_dirty() {
+            if let Some(gfx) = &mut self.gfx {
+                let (vertices, indices) = self.world.build_chunk(cx, cz);
+                gfx.set_chunk(cx, cz, &vertices, &indices);
+            }
         }
     }
 
@@ -145,7 +147,11 @@ impl App {
         else {
             return;
         };
+        let ice = self.world.is_ice(x, y, z);
         if let Some(block) = self.world.remove_block(x, y, z) {
+            if let Some(music) = &self.music {
+                music.dig(block, ice);
+            }
             self.resources.gain(block);
             self.rebuild_mesh();
         }
