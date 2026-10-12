@@ -2,6 +2,7 @@ mod enemy;
 mod hud;
 mod music;
 mod player;
+mod resources;
 mod textures;
 mod world;
 
@@ -13,7 +14,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -21,16 +22,16 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 use hud::{HudVertex, MAX_HUD_VERTICES};
 use enemy::{Dice, Enemy};
 use player::Player;
+use resources::Resources;
 use world::{Vertex, World};
 
 const WALK_SPEED: f32 = 5.0;
 const SPRINT_SPEED: f32 = 8.0;
 const MOUSE_SENSITIVITY: f32 = 0.0022;
 const FOV_Y_DEGREES: f32 = 80.0;
-const MINE_INTERVAL: f32 = 3.0; // seconds between automatic clicks
+const MINE_INTERVAL: f32 = 2.0 / 3.0; // seconds of holding to mine one block
 const REACH: f32 = 5.0; // blocks
-const ATTACK_INTERVAL: f32 = 1.0; // seconds between hits while holding the button
-const ROLL_DISPLAY_SECONDS: f32 = 2.0;
+const ROLL_DISPLAY_SECONDS: f32 = 3.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
@@ -51,39 +52,6 @@ struct Keys {
     jump: bool,
     /// Left mouse button held.
     mining: bool,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Mine,
-    Attack,
-    Off,
-}
-
-impl Mode {
-    const ALL: [Mode; 3] = [Mode::Mine, Mode::Attack, Mode::Off];
-
-    fn step(self, forward: bool) -> Mode {
-        let i = Mode::ALL.iter().position(|m| *m == self).unwrap();
-        let n = Mode::ALL.len();
-        Mode::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }]
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Mine => "MINE",
-            Mode::Attack => "ATTACK",
-            Mode::Off => "OFF",
-        }
-    }
-
-    fn color(self) -> [f32; 3] {
-        match self {
-            Mode::Mine => [0.85, 0.87, 0.92],
-            Mode::Attack => [0.95, 0.35, 0.30],
-            Mode::Off => [0.65, 0.65, 0.65],
-        }
-    }
 }
 
 fn make_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -626,18 +594,27 @@ struct App {
     player: Player,
     keys: Keys,
     last_frame: Instant,
-    mode: Mode,
-    rocks: u32,
+    resources: Resources,
     mine_timer: f32,
     enemy: Option<Enemy>,
     dice: Dice,
-    attack_timer: f32,
     /// Last roll and how long ago it happened.
     last_roll: Option<(u32, u32, f32)>,
+    /// Damage lands when the dice finish rolling.
+    roll_applied: bool,
     _music: Option<music::Music>,
 }
 
 impl App {
+    /// The block under the crosshair within reach, unless the enemy is what you're looking at.
+    fn block_in_sights(&self) -> Option<(i32, i32, i32)> {
+        if self.enemy_in_sights().is_some() {
+            return None;
+        }
+        self.world
+            .raycast(self.player.eye(), self.player.forward(), REACH)
+    }
+
     /// The enemy's bounding box, if he is in reach, under the crosshair, and not behind a block.
     fn enemy_in_sights(&self) -> Option<(Vec3, Vec3)> {
         let enemy = self.enemy.as_ref()?;
@@ -654,13 +631,27 @@ impl App {
         Some((min, max))
     }
 
-    /// One attack tick: roll 2d6 and deal that much damage if the enemy is in sights.
+    /// One click: if the enemy is in sights, roll 2d6. The damage lands once the dice have
+    /// finished rolling on screen (see `apply_roll`).
     fn attack(&mut self) {
         if self.enemy_in_sights().is_none() {
             return;
         }
+        // Clicking again mid-roll cuts the old roll short, so its damage still counts.
+        self.apply_roll(true);
         let (a, b) = self.dice.roll_2d6();
         self.last_roll = Some((a, b, 0.0));
+        self.roll_applied = false;
+    }
+
+    fn apply_roll(&mut self, force: bool) {
+        let Some((a, b, age)) = self.last_roll else {
+            return;
+        };
+        if self.roll_applied || (!force && age < hud::ROLL_ANIM_SECONDS) {
+            return;
+        }
+        self.roll_applied = true;
         if let Some(enemy) = &mut self.enemy {
             enemy.health -= (a + b) as i32;
             if enemy.health <= 0 {
@@ -676,8 +667,8 @@ impl App {
         else {
             return;
         };
-        if self.world.remove_block(x, y, z) {
-            self.rocks += 1;
+        if let Some(block) = self.world.remove_block(x, y, z) {
+            self.resources.gain(block);
             let (vertices, indices) = self.world.build_mesh();
             if let Some(gfx) = &mut self.gfx {
                 gfx.update_mesh(&vertices, &indices);
@@ -732,15 +723,9 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 self.keys.mining = state == ElementState::Pressed;
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let amount = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
-                };
-                if amount != 0.0 {
-                    self.mode = self.mode.step(amount > 0.0);
-                    self.mine_timer = 0.0;
+                // Every click is an attack, if the enemy is what the crosshair is on.
+                if state == ElementState::Pressed {
+                    self.attack();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -781,9 +766,9 @@ impl ApplicationHandler for App {
                 let velocity = dir.normalize_or_zero() * speed;
                 self.player.update(dt, velocity, self.keys.jump, &self.world);
 
-                // Auto-click: every few seconds, mine whatever the crosshair is on.
-                // Progress only builds while the left button is held; letting go starts over.
-                if self.mode == Mode::Mine && self.keys.mining {
+                // Mining: progress builds while the button is held on a block. Looking at the
+                // enemy or away from the ground, or letting go, starts over.
+                if self.keys.mining && self.block_in_sights().is_some() {
                     self.mine_timer += dt;
                     if self.mine_timer >= MINE_INTERVAL {
                         self.mine_timer -= MINE_INTERVAL;
@@ -793,48 +778,30 @@ impl ApplicationHandler for App {
                     self.mine_timer = 0.0;
                 }
 
-                // Attack mode: while the button is held, hit once per second.
-                if self.mode == Mode::Attack && self.keys.mining {
-                    self.attack_timer += dt;
-                    if self.attack_timer >= ATTACK_INTERVAL {
-                        self.attack_timer -= ATTACK_INTERVAL;
-                        self.attack();
-                    }
-                } else {
-                    self.attack_timer = 0.0;
-                }
                 if let Some((_, _, age)) = &mut self.last_roll {
                     *age += dt;
                 }
+                self.apply_roll(false);
                 if self.last_roll.is_some_and(|(_, _, age)| age > ROLL_DISPLAY_SECONDS) {
                     self.last_roll = None;
                 }
 
-                // Cracks grow with the timer: light after 1 second, heavy after 2.
-                let stage = (self.mine_timer / (MINE_INTERVAL / 3.0)) as u32;
-                let target = if self.mode == Mode::Mine {
-                    self.world
-                        .raycast(self.player.eye(), self.player.forward(), REACH)
-                } else {
-                    None
-                };
+                // One crack stage, halfway through the mining time.
+                let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+                // Whatever the crosshair is on: the enemy, or else a block.
+                let enemy_target = self.enemy_in_sights();
+                let target = self.block_in_sights();
                 let crack = target
                     .filter(|_| stage >= 1)
-                    .map(|block| (block, stage.min(2)));
+                    .map(|block| (block, stage));
 
-                // One wireframe at a time: the block in mine mode, the enemy in attack mode.
-                let outline = target
-                    .map(|(x, y, z)| {
+                // One wireframe, around whichever it is.
+                let outline = enemy_target.or_else(|| {
+                    target.map(|(x, y, z)| {
                         let min = Vec3::new(x as f32, y as f32, z as f32);
                         (min, min + Vec3::ONE)
                     })
-                    .or_else(|| {
-                        if self.mode == Mode::Attack {
-                            self.enemy_in_sights()
-                        } else {
-                            None
-                        }
-                    });
+                });
 
                 let look_at = self.player.pos;
                 let enemy_mesh = self.enemy.as_ref().map(|e| {
@@ -842,9 +809,6 @@ impl ApplicationHandler for App {
                     let cracks = e.cracked().then(|| e.mesh(look_at, true));
                     (body, cracks)
                 });
-                let roll_text = self
-                    .last_roll
-                    .map(|(a, b, _)| format!("2D6: {a} + {b} = {}", a + b));
 
                 if let Some(gfx) = &mut self.gfx {
                     gfx.set_outline(outline);
@@ -853,10 +817,8 @@ impl ApplicationHandler for App {
                     let hud = hud::build(
                         gfx.config.width,
                         gfx.config.height,
-                        self.rocks,
-                        self.mode.label(),
-                        self.mode.color(),
-                        roll_text.as_deref(),
+                        self.resources.as_array(),
+                        self.last_roll,
                     );
                     gfx.render(self.player.eye(), self.player.forward(), &hud);
                 }
@@ -897,13 +859,12 @@ fn main() {
         player,
         keys: Keys::default(),
         last_frame: Instant::now(),
-        mode: Mode::Mine,
-        rocks: 0,
+        resources: Resources::default(),
         mine_timer: 0.0,
         enemy: Some(Enemy::new(enemy_spot)),
         dice: Dice::new(),
-        attack_timer: 0.0,
         last_roll: None,
+        roll_applied: true,
         _music: music::Music::start(),
     };
     event_loop.run_app(&mut app).unwrap();

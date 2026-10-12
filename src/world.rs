@@ -386,13 +386,15 @@ impl World {
         }
     }
 
-    /// Removes a block. The bottom layer is kept so there's never a hole to the void.
-    pub fn remove_block(&mut self, x: i32, y: i32, z: i32) -> bool {
-        if y <= 0 || self.get(x, y, z) == Block::Air {
-            return false;
+    /// Removes a block and returns what it was. The bottom layer is kept so there's never a
+    /// hole to the void.
+    pub fn remove_block(&mut self, x: i32, y: i32, z: i32) -> Option<Block> {
+        let block = self.get(x, y, z);
+        if y <= 0 || block == Block::Air {
+            return None;
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = Block::Air;
-        true
+        Some(block)
     }
 
     /// The six faces of one block, pushed out a hair so they sit on top of the real faces.
@@ -659,12 +661,12 @@ mod tests {
             .raycast(s + Vec3::new(0.0, 1.62, 0.0), Vec3::NEG_Y, 5.0)
             .expect("ground within reach");
         assert_eq!(hit.1, s.y.floor() as i32 - 1);
-        assert!(w.remove_block(hit.0, hit.1, hit.2));
+        assert!(w.remove_block(hit.0, hit.1, hit.2).is_some());
         assert_eq!(w.get(hit.0, hit.1, hit.2), Block::Air);
         // Straight up from the eye there is nothing in reach.
         assert!(w.raycast(s + Vec3::new(0.0, 1.62, 0.0), Vec3::Y, 5.0).is_none());
         // The bottom layer can't be mined.
-        assert!(!w.remove_block(10, 0, 10));
+        assert!(w.remove_block(10, 0, 10).is_none());
     }
 
     #[test]
