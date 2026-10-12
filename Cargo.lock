@@ -558,10 +558,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "game-core"
+version = "0.1.0"
+dependencies = [
+ "glam",
+]
+
+[[package]]
 name = "gamedemo"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "game-core",
  "glam",
  "pollster",
  "rodio",
