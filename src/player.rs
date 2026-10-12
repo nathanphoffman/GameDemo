@@ -8,6 +8,10 @@ pub const EYE_HEIGHT: f32 = 1.62;
 const GRAVITY: f32 = 32.0;
 const JUMP_SPEED: f32 = 9.0; // about 1.25 blocks high
 const TERMINAL_SPEED: f32 = 50.0;
+const WATER_GRAVITY: f32 = 10.0;
+const SINK_SPEED: f32 = 3.0;
+const SWIM_SPEED: f32 = 5.0;
+const SWIM_SLOWDOWN: f32 = 0.6;
 const SUBSTEP: f32 = 1.0 / 120.0;
 const SNAP_GAP: f32 = 1e-3;
 
@@ -53,13 +57,25 @@ impl Player {
 
     /// `velocity` is the desired horizontal movement in blocks per second.
     pub fn update(&mut self, dt: f32, velocity: Vec3, jump: bool, world: &World) {
+        let feet_wet = world.in_water(self.pos + Vec3::new(0.0, 0.1, 0.0));
+        let body_wet = world.in_water(self.pos + Vec3::new(0.0, 0.9, 0.0));
+        let velocity = if body_wet { velocity * SWIM_SLOWDOWN } else { velocity };
         if jump && self.on_ground {
             self.vel_y = JUMP_SPEED;
+        } else if jump && feet_wet {
+            // Swim up, which is also enough of a kick to climb onto a bank.
+            self.vel_y = self.vel_y.max(SWIM_SPEED);
         }
         let steps = (dt / SUBSTEP).ceil().max(1.0) as u32;
         let h = dt / steps as f32;
         for _ in 0..steps {
-            self.vel_y = (self.vel_y - GRAVITY * h).max(-TERMINAL_SPEED);
+            // Water holds you up: you sink slowly instead of falling.
+            let wet = world.in_water(self.pos + Vec3::new(0.0, 0.9, 0.0));
+            self.vel_y = if wet {
+                (self.vel_y - WATER_GRAVITY * h).max(-SINK_SPEED)
+            } else {
+                (self.vel_y - GRAVITY * h).max(-TERMINAL_SPEED)
+            };
             self.on_ground = false;
             self.move_axis(world, 0, velocity.x * h);
             self.move_axis(world, 2, velocity.z * h);

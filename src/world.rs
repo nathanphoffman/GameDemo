@@ -1,9 +1,12 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
-pub const SIZE_X: usize = 240;
-pub const SIZE_Z: usize = 240;
+pub const SIZE_X: usize = 512;
+pub const SIZE_Z: usize = 512;
 pub const SIZE_Y: usize = 64;
+
+/// Water fills every column lower than this, up to (not including) this height.
+pub const WATER_LEVEL: usize = 6;
 
 /// Small margin so a box resting exactly on a block boundary isn't treated as inside it.
 pub const EPS: f32 = 1e-4;
@@ -122,6 +125,8 @@ pub struct RayHit {
 pub struct World {
     blocks: Vec<Block>,
     heights: Vec<u8>,
+    /// One above the highest non-air block, so meshing can skip the empty sky.
+    top_y: usize,
 }
 
 pub fn hash(x: u32, y: u32, seed: u32) -> f32 {
@@ -194,6 +199,43 @@ fn mountain_height(x: f32, z: f32, seed: u32) -> f32 {
     3.0 + 38.0 * t.powf(1.5)
 }
 
+/// How wet a column is: 0 = dry land, up to 1 in the deepest part of a river, lake or pond.
+fn wetness(x: f32, z: f32, seed: u32) -> f32 {
+    // Rivers wind along the middle contour of a warped noise field.
+    let warp_x = (fbm_with(x / 40.0, z / 40.0, seed ^ 0x51F7, 2, 0.5, false) - 0.5) * 50.0;
+    let warp_z = (fbm_with(x / 40.0 + 17.0, z / 40.0 - 9.0, seed ^ 0x51F8, 2, 0.5, false) - 0.5) * 50.0;
+    let bend = fbm_with((x + warp_x) / 110.0, (z + warp_z) / 110.0, seed ^ 0xA1BE, 2, 0.4, false);
+    let river = 1.0 - (bend - 0.5).abs() / 0.02;
+    // Big, slow blobs make lakes; small, fast ones make ponds.
+    let lake = (fbm_with(x / 55.0, z / 55.0, seed ^ 0x1A4E, 3, 0.5, false) - 0.68) / 0.1;
+    let pond = (fbm_with(x / 16.0, z / 16.0, seed ^ 0x90D, 2, 0.5, false) - 0.78) / 0.08;
+    river.max(lake).max(pond).clamp(0.0, 1.0)
+}
+
+/// Spreads `limit` outward so neighbouring columns differ by at most 1: each column ends up
+/// no higher than the lowest seeded column plus its distance from it.
+fn slope_limit(limit: &mut [u8]) {
+    let (w, d) = (SIZE_X as i32, SIZE_Z as i32);
+    // Neighbours already visited by a forward sweep, and by a backward one.
+    const BEFORE: [(i32, i32); 4] = [(-1, 0), (-1, -1), (0, -1), (1, -1)];
+    const AFTER: [(i32, i32); 4] = [(1, 0), (1, 1), (0, 1), (-1, 1)];
+    for forward in [true, false] {
+        let neighbours = if forward { BEFORE } else { AFTER };
+        for step in 0..w * d {
+            let i = if forward { step } else { w * d - 1 - step };
+            let (x, z) = (i % w, i / w);
+            let mut best = limit[i as usize];
+            for (dx, dz) in neighbours {
+                let (nx, nz) = (x + dx, z + dz);
+                if nx >= 0 && nz >= 0 && nx < w && nz < d {
+                    best = best.min(limit[(nz * w + nx) as usize].saturating_add(1));
+                }
+            }
+            limit[i as usize] = best;
+        }
+    }
+}
+
 pub(crate) struct Face {
     pub(crate) normal: [i32; 3],
     pub(crate) corners: [[f32; 3]; 4],
@@ -258,27 +300,64 @@ impl World {
     pub fn generate(seed: u32) -> World {
         let mut blocks = vec![Block::Air; SIZE_X * SIZE_Y * SIZE_Z];
         let mut heights = vec![0u8; SIZE_X * SIZE_Z];
+        let (spawn_x, spawn_z) = ((SIZE_X / 2) as f32, (SIZE_Z / 2) as f32);
+        // 1 right at the spawn point, fading to 0 forty blocks away. Keeps water off it.
+        let near_spawn = |x: usize, z: usize| {
+            let d = ((x as f32 - spawn_x).powi(2) + (z as f32 - spawn_z).powi(2)).sqrt();
+            1.0 - smoothstep((d - 20.0) / 20.0)
+        };
+
+        // The dry-land shape, plus the water beds carved into it.
+        let mut limit = vec![u8::MAX; SIZE_X * SIZE_Z];
         for z in 0..SIZE_Z {
             for x in 0..SIZE_X {
-                let snow = snow_amount(x, z, seed);
                 // Terrain shape follows the zone smoothly, so hills grow into mountains.
-                let w = smoothstep(snow);
+                let w = smoothstep(snow_amount(x, z, seed));
                 let (fx, fz) = (x as f32, z as f32);
                 let hills = hill_height(fx, fz, seed);
                 let mountains = mountain_height(fx, fz, seed);
                 let h = (hills + (mountains - hills) * w).round() as usize;
-                let h = h.clamp(1, SIZE_Y - 1);
-                heights[z * SIZE_X + x] = h as u8;
+                heights[z * SIZE_X + x] = h.clamp(1, SIZE_Y - 1) as u8;
 
-                let top = Self::surface_block(x, z, snow, seed);
+                // Water is rarer up in the mountains, so it doesn't cut the peaks down.
+                let wet = wetness(fx, fz, seed) * (1.0 - near_spawn(x, z)) * (1.0 - 0.9 * w);
+                if wet > 0.0 {
+                    // One block deep at the edge, up to four in the middle.
+                    let bed = WATER_LEVEL as f32 - 1.0 - wet * 3.0;
+                    limit[z * SIZE_X + x] = bed.round() as u8;
+                }
+            }
+        }
+        // Land can't be steeper than a step per block next to water, so banks are walkable.
+        slope_limit(&mut limit);
+
+        for z in 0..SIZE_Z {
+            for x in 0..SIZE_X {
+                let i = z * SIZE_X + x;
+                // Dry ground around the spawn point.
+                let floor = (WATER_LEVEL as f32 * near_spawn(x, z)).round() as usize;
+                let h = (heights[i].min(limit[i]) as usize).max(floor).clamp(1, SIZE_Y - 1);
+                heights[i] = h as u8;
+
+                // Beaches and lake beds are bare earth.
+                let top = if h <= WATER_LEVEL {
+                    Block::Dirt
+                } else {
+                    Self::surface_block(x, z, snow_amount(x, z, seed), seed)
+                };
                 // Snowy country has rock under the snow; grassy country has dirt.
                 let under = if top == Block::Snow { Block::Stone } else { Block::Dirt };
                 for y in 0..h {
                     blocks[Self::index(x, y, z)] = if y + 1 == h { top } else { under };
                 }
+                for y in h..WATER_LEVEL {
+                    blocks[Self::index(x, y, z)] = Block::Water;
+                }
             }
         }
-        let mut world = World { blocks, heights };
+        // Trees reach about a dozen blocks above the ground.
+        let top_y = (heights.iter().copied().max().unwrap_or(0) as usize + 12).min(SIZE_Y);
+        let mut world = World { blocks, heights, top_y };
         world.plant_trees(seed);
         world
     }
@@ -291,6 +370,7 @@ impl World {
         let i = Self::index(x as usize, y as usize, z as usize);
         if self.blocks[i] == Block::Air {
             self.blocks[i] = block;
+            self.top_y = self.top_y.max(y as usize + 1);
         }
     }
 
@@ -442,12 +522,18 @@ impl World {
         self.blocks[Self::index(x as usize, y as usize, z as usize)]
     }
 
-    /// Solid for collision purposes: the floor and the world's sides are solid walls.
+    /// Solid for collision purposes: the floor and the world's sides are solid walls. Water
+    /// isn't, you swim through it.
     fn solid(&self, x: i32, y: i32, z: i32) -> bool {
         if y < 0 || x < 0 || z < 0 || x >= SIZE_X as i32 || z >= SIZE_Z as i32 {
             return true;
         }
-        self.get(x, y, z) != Block::Air
+        !matches!(self.get(x, y, z), Block::Air | Block::Water)
+    }
+
+    /// Is there water in the cell containing this point?
+    pub fn in_water(&self, p: Vec3) -> bool {
+        self.get(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32) == Block::Water
     }
 
     /// Does the box from `min` to `max` overlap any solid block?
@@ -502,7 +588,7 @@ impl World {
         }
         let mut previous: Option<(i32, i32, i32)> = None;
         loop {
-            if self.get(cell[0], cell[1], cell[2]) != Block::Air {
+            if !matches!(self.get(cell[0], cell[1], cell[2]), Block::Air | Block::Water) {
                 return Some(RayHit {
                     block: (cell[0], cell[1], cell[2]),
                     place: previous,
@@ -582,10 +668,11 @@ impl World {
             && x < SIZE_X as i32
             && y < SIZE_Y as i32
             && z < SIZE_Z as i32;
-        if !inside || block == Block::Air || self.get(x, y, z) != Block::Air {
+        if !inside || block == Block::Air || !matches!(self.get(x, y, z), Block::Air | Block::Water) {
             return false;
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
+        self.top_y = self.top_y.max(y as usize + 1);
         true
     }
 
@@ -731,7 +818,7 @@ impl World {
     pub fn build_mesh(&self) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        for y in 0..SIZE_Y as i32 {
+        for y in 0..self.top_y.min(SIZE_Y) as i32 {
             for z in 0..SIZE_Z as i32 {
                 for x in 0..SIZE_X as i32 {
                     let block = self.get(x, y, z);
@@ -805,12 +892,12 @@ mod tests {
             let (mut hill_max, mut mountain_max, mut mountain_min) = (0, 0, i32::MAX);
             for z in 0..SIZE_Z - 1 {
                 for x in 0..SIZE_X - 1 {
-                    if x < 80 {
+                    if x < SIZE_X / 3 {
                         hill_max = hill_max.max(column(x, z));
                         // No cliffs in the hills: every step can be hopped up.
                         assert!((column(x, z) - column(x + 1, z)).abs() <= 1);
                         assert!((column(x, z) - column(x, z + 1)).abs() <= 1);
-                    } else if x >= 160 {
+                    } else if x >= SIZE_X * 2 / 3 {
                         mountain_max = mountain_max.max(column(x, z));
                         mountain_min = mountain_min.min(column(x, z));
                     }
