@@ -479,28 +479,33 @@ impl World {
         (vertices, indices)
     }
 
-    /// A flat, open spot ahead of the spawn point (the player starts facing -Z) with room for
-    /// a 3x3x3 skeleton. Returns the bottom center.
-    pub fn enemy_spot(&self) -> Vec3 {
-        let (cx, cz) = ((SIZE_X / 2) as i32, (SIZE_Z / 2) as i32);
-        for dist in 7..60 {
-            for dx in [0, 3, -3, 6, -6] {
-                let (x, z) = (cx + dx, cz - dist);
-                if x < 2 || z < 2 || x + 2 >= SIZE_X as i32 || z + 2 >= SIZE_Z as i32 {
-                    continue;
-                }
-                let ground = self.heights[z as usize * SIZE_X + x as usize] as i32;
-                let clear = (0..3).all(|dy| {
-                    (-1..=1).all(|ox| {
-                        (-1..=1).all(|oz| self.get(x + ox, ground + dy, z + oz) == Block::Air)
-                    })
-                });
-                if clear {
-                    return Vec3::new(x as f32 + 0.5, ground as f32, z as f32 + 0.5);
+    /// The closest spot to (`want_x`, `want_z`) with room for a 3x3x3 creature standing on the
+    /// ground, searching outward in rings. Returns the bottom center.
+    pub fn open_spot(&self, want_x: i32, want_z: i32) -> Vec3 {
+        for radius in 0..40i32 {
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    // Only the outline of this ring; the inside was checked already.
+                    if dx.abs().max(dz.abs()) != radius {
+                        continue;
+                    }
+                    let (x, z) = (want_x + dx, want_z + dz);
+                    if x < 2 || z < 2 || x + 2 >= SIZE_X as i32 || z + 2 >= SIZE_Z as i32 {
+                        continue;
+                    }
+                    let ground = self.heights[z as usize * SIZE_X + x as usize] as i32;
+                    let clear = (0..3).all(|dy| {
+                        (-1..=1).all(|ox| {
+                            (-1..=1).all(|oz| self.get(x + ox, ground + dy, z + oz) == Block::Air)
+                        })
+                    });
+                    if clear {
+                        return Vec3::new(x as f32 + 0.5, ground as f32, z as f32 + 0.5);
+                    }
                 }
             }
         }
-        self.spawn_point() + Vec3::new(0.0, 0.0, -7.0)
+        self.spawn_point()
     }
 
     /// Feet position standing on the surface in the middle of the world.
@@ -683,10 +688,10 @@ mod tests {
     }
 
     #[test]
-    fn enemy_spot_is_open_and_on_the_ground() {
+    fn open_spot_is_open_and_on_the_ground() {
         for seed in [1, 2, 3, 99] {
             let w = World::generate(seed);
-            let p = w.enemy_spot();
+            let p = w.open_spot(SIZE_X as i32 / 2, SIZE_Z as i32 / 2 - 7);
             let (x, y, z) = (p.x.floor() as i32, p.y as i32, p.z.floor() as i32);
             assert_ne!(w.get(x, y - 1, z), Block::Air, "standing on something");
             for dy in 0..3 {

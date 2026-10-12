@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
 /// Room for the crosshair, the rock counter and the dice.
-pub const MAX_HUD_VERTICES: usize = 8192;
+pub const MAX_HUD_VERTICES: usize = 16384;
 
 /// Row colors for grey (stone), white (snow), green (grass and leaves), brown (wood).
 const RESOURCE_COLORS: [[f32; 3]; 4] = [
@@ -11,8 +11,8 @@ const RESOURCE_COLORS: [[f32; 3]; 4] = [
     [0.50, 0.32, 0.17],
 ];
 
-/// How long the dice tumble before they settle on their result.
-pub const ROLL_ANIM_SECONDS: f32 = 1.5;
+use crate::combat::ROLL_ANIM_SECONDS;
+
 /// After landing, the damage line shows up this much later than the sum.
 const DAMAGE_LINE_DELAY: f32 = 0.4;
 
@@ -45,11 +45,14 @@ fn glyph(c: char) -> [u8; 5] {
         '=' => [0b000, 0b111, 0b000, 0b111, 0b000],
         'F' => [0b111, 0b100, 0b110, 0b100, 0b100],
         'G' => [0b011, 0b100, 0b101, 0b101, 0b011],
+        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
         'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
         'K' => [0b101, 0b101, 0b110, 0b101, 0b101],
         'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
         'N' => [0b110, 0b101, 0b101, 0b101, 0b101],
         'O' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        'P' => [0b110, 0b101, 0b110, 0b100, 0b100],
+        '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
         'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
         _ => [0; 5],
     }
@@ -97,9 +100,9 @@ impl Builder {
     }
 
     /// A die face of width `size` showing `value` pips, turned by `angle`.
-    fn die(&mut self, cx: f32, cy: f32, size: f32, angle: f32, value: u32) {
-        self.turned_square(cx, cy, size / 2.0, angle, [0.10, 0.10, 0.12]);
-        self.turned_square(cx, cy, size / 2.0 - size * 0.05, angle, [0.96, 0.95, 0.90]);
+    fn die(&mut self, cx: f32, cy: f32, size: f32, angle: f32, value: u32, style: &DiceStyle) {
+        self.turned_square(cx, cy, size / 2.0, angle, style.border);
+        self.turned_square(cx, cy, size / 2.0 - size * 0.05, angle, style.body);
         let pips: &[(f32, f32)] = match value {
             1 => &[(0.0, 0.0)],
             2 => &[(-1.0, -1.0), (1.0, 1.0)],
@@ -116,7 +119,7 @@ impl Builder {
                 cy + x * sin + y * cos,
                 size * 0.075,
                 angle,
-                [0.10, 0.10, 0.12],
+                style.pip,
             );
         }
     }
@@ -151,20 +154,99 @@ impl Builder {
     }
 }
 
-/// Everything drawn on top of the world: crosshair, rock counter, dice.
+struct DiceStyle {
+    body: [f32; 3],
+    pip: [f32; 3],
+    border: [f32; 3],
+    sum_color: [f32; 3],
+    damage_color: [f32; 3],
+}
+
+const PLAYER_DICE: DiceStyle = DiceStyle {
+    body: [0.96, 0.95, 0.90],
+    pip: [0.10, 0.10, 0.12],
+    border: [0.10, 0.10, 0.12],
+    sum_color: [1.0, 0.9, 0.35],
+    damage_color: [1.0, 0.45, 0.35],
+};
+
+const ENEMY_DICE: DiceStyle = DiceStyle {
+    body: [0.80, 0.12, 0.10],
+    pip: [1.0, 1.0, 1.0],
+    border: [0.20, 0.02, 0.02],
+    sum_color: [1.0, 0.9, 0.35],
+    damage_color: [1.0, 0.45, 0.35],
+};
+
+/// Two dice that slide in, bounce and tumble to a stop centered on `cx`, resting at height
+/// `rest_y`. Once landed, the sum and the damage appear above or below them.
+fn draw_roll(
+    b: &mut Builder,
+    cx: f32,
+    rest_y: f32,
+    scale: f32,
+    (first, second, age): (u32, u32, f32),
+    style: &DiceStyle,
+    text_below: bool,
+) {
+    let die_size = 16.0 * scale;
+    let u = (age / ROLL_ANIM_SECONDS).clamp(0.0, 1.0);
+    // Fast at first, easing to a stop.
+    let eased = 1.0 - (1.0 - u).powi(3);
+    let tau = std::f32::consts::TAU;
+
+    for (i, result) in [first, second].into_iter().enumerate() {
+        let side = if i == 0 { -1.0 } else { 1.0 };
+        // Slides in from the outside, bounces, and tumbles to a flat stop.
+        let x = cx + side * (die_size * 0.8 + (1.0 - eased) * die_size * 3.0);
+        let bounce = (u * 3.0 * std::f32::consts::PI).sin().abs() * (1.0 - u) * die_size * 1.2;
+        let angle = (1.0 - eased) * (3.0 + i as f32) * tau * side;
+        let value = if u >= 1.0 {
+            result
+        } else {
+            // Cycle through faces, slowing down as it settles.
+            ((eased * 20.0) as u32 + 3 * i as u32) * 5 % 6 + 1
+        };
+        b.die(x, rest_y - bounce, die_size, angle, value, style);
+    }
+
+    if age < ROLL_ANIM_SECONDS {
+        return;
+    }
+    let sum = first + second;
+    let text_scale = scale * 1.5;
+    let line_height = 8.0 * text_scale;
+    let (sum_y, damage_y) = if text_below {
+        let y = rest_y + die_size * 0.5 + 3.0 * scale;
+        (y, y + line_height)
+    } else {
+        let y = rest_y - die_size * 0.5 - 3.0 * scale - line_height;
+        (y, y - line_height)
+    };
+    b.centered_text(cx, sum_y, text_scale, &format!("{first} + {second} = {sum}"), style.sum_color);
+    if age >= ROLL_ANIM_SECONDS + DAMAGE_LINE_DELAY {
+        b.centered_text(cx, damage_y, text_scale, &format!("DAMAGE {sum}"), style.damage_color);
+    }
+}
+
+/// Everything drawn on top of the world: crosshair, resource counters, dice, health bar.
 pub fn build(
     width: u32,
     height: u32,
     // grey, white, green, brown
     resources: [u32; 4],
-    // (first die, second die, seconds since the roll started)
-    roll: Option<(u32, u32, f32)>,
+    // Each roll is (first die, second die, seconds since the roll started).
+    player_roll: Option<(u32, u32, f32)>,
+    enemy_roll: Option<(u32, u32, f32)>,
+    // (health shown on the bar, actual health, max health). The shown value trails the actual
+    // one after a hit, which paints the draining chunk.
+    hp: (f32, i32, i32),
 ) -> Vec<HudVertex> {
     let (w, h) = (width as f32, height as f32);
     let mut b = Builder {
         width: w,
         height: h,
-        verts: Vec::with_capacity(512),
+        verts: Vec::with_capacity(1024),
     };
 
     // Crosshair: four small bars around the center.
@@ -186,52 +268,40 @@ pub fn build(
         b.text(margin + 8.0 * scale, y + 0.5 * scale, scale, &count.to_string(), white);
     }
 
-    if let Some((first, second, age)) = roll {
-        let die_size = 18.0 * scale;
+    // Top center: the player's dice.
+    if let Some(roll) = player_roll {
         let top = h * 0.2;
-        let u = (age / ROLL_ANIM_SECONDS).clamp(0.0, 1.0);
-        // Fast at first, easing to a stop.
-        let eased = 1.0 - (1.0 - u).powi(3);
-        let tau = std::f32::consts::TAU;
+        b.centered_text(cx, top - 16.0 * scale * 1.25, scale * 1.5, "2D6", [0.9, 0.9, 0.9]);
+        draw_roll(&mut b, cx, top, scale, roll, &PLAYER_DICE, true);
+    }
 
-        let text_scale = scale * 1.5;
-        b.centered_text(cx, top - die_size * 1.25, text_scale, "2D6", [0.9, 0.9, 0.9]);
-
-        for (i, result) in [first, second].into_iter().enumerate() {
-            let side = if i == 0 { -1.0 } else { 1.0 };
-            // Slides in from the outside, bounces, and tumbles to a flat stop.
-            let x = cx + side * (die_size * 0.8 + (1.0 - eased) * die_size * 3.0);
-            let bounce = (u * 3.0 * std::f32::consts::PI).sin().abs() * (1.0 - u) * die_size * 1.2;
-            let angle = (1.0 - eased) * (3.0 + i as f32) * tau * side;
-            let value = if u >= 1.0 {
-                result
-            } else {
-                // Cycle through faces, slowing down as it settles.
-                ((eased * 20.0) as u32 + 3 * i as u32) * 5 % 6 + 1
-            };
-            b.die(x, top - bounce, die_size, angle, value);
-        }
-
-        if age >= ROLL_ANIM_SECONDS {
-            let sum = first + second;
-            let line = top + die_size * 0.8;
-            b.centered_text(
-                cx,
-                line,
-                text_scale,
-                &format!("{first} + {second} = {sum}"),
-                [1.0, 0.9, 0.35],
-            );
-            if age >= ROLL_ANIM_SECONDS + DAMAGE_LINE_DELAY {
-                b.centered_text(
-                    cx,
-                    line + 8.0 * text_scale,
-                    text_scale,
-                    &format!("DAMAGE {sum}"),
-                    [1.0, 0.45, 0.35],
-                );
-            }
-        }
+    // Bottom center: health bar, with the skeleton's red dice just above it.
+    let (shown, actual, max) = hp;
+    let max = max.max(1) as f32;
+    let (bar_w, bar_h) = (80.0 * scale, 6.0 * scale);
+    let (bar_x, bar_y) = (cx - bar_w / 2.0, h - 8.0 * scale - bar_h);
+    b.rect(
+        bar_x - scale,
+        bar_y - scale,
+        bar_w + 2.0 * scale,
+        bar_h + 2.0 * scale,
+        [0.05, 0.05, 0.06],
+    );
+    b.rect(bar_x, bar_y, bar_w, bar_h, [0.30, 0.05, 0.05]);
+    let fraction = |v: f32| (v / max).clamp(0.0, 1.0);
+    // The trail first (what was just lost), then the real health over it.
+    b.rect(bar_x, bar_y, bar_w * fraction(shown), bar_h, [0.95, 0.60, 0.20]);
+    b.rect(bar_x, bar_y, bar_w * fraction(actual as f32), bar_h, [0.25, 0.78, 0.28]);
+    b.centered_text(
+        cx,
+        bar_y - 7.0 * scale,
+        scale,
+        &format!("HP {}/{}", actual.max(0), max as i32),
+        white,
+    );
+    if let Some(roll) = enemy_roll {
+        let rest_y = bar_y - 7.0 * scale - 3.0 * scale - 8.0 * scale;
+        draw_roll(&mut b, cx, rest_y, scale, roll, &ENEMY_DICE, false);
     }
 
     b.verts
@@ -245,10 +315,11 @@ mod tests {
     fn hud_always_fits_in_the_buffer() {
         for age in [0.0, 0.3, 0.9, 1.4, 1.5, 1.7, 2.5, 3.0] {
             for roll in [(1, 1, age), (6, 6, age), (3, 5, age)] {
-                let v = build(3840, 2160, [99999; 4], Some(roll));
+                let v = build(3840, 2160, [99999; 4], Some(roll), Some(roll), (50.0, 50, 50));
                 assert!(v.len() <= MAX_HUD_VERTICES, "{} at age {age}", v.len());
             }
         }
-        assert!(build(1920, 1080, [0; 4], None).len() < 1000);
+        let quiet = build(1920, 1080, [0; 4], None, None, (50.0, 50, 50));
+        assert!(quiet.len() < 3000, "{}", quiet.len());
     }
 }

@@ -1,3 +1,4 @@
+mod combat;
 mod enemy;
 mod hud;
 mod music;
@@ -20,7 +21,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use hud::{HudVertex, MAX_HUD_VERTICES};
-use enemy::{Dice, Enemy};
+use combat::{Combat, Side, MAX_PLAYER_HP};
+use enemy::{Dice, Enemy, Kind, Sight};
 use player::Player;
 use resources::Resources;
 use world::{Vertex, World};
@@ -31,7 +33,14 @@ const MOUSE_SENSITIVITY: f32 = 0.0022;
 const FOV_Y_DEGREES: f32 = 80.0;
 const MINE_INTERVAL: f32 = 2.0 / 3.0; // seconds of holding to mine one block
 const REACH: f32 = 5.0; // blocks
-const ROLL_DISPLAY_SECONDS: f32 = 3.0;
+// Hostile enemies attack on their own when they are this close (horizontally)...
+const MELEE_RANGE: f32 = 2.3;
+// ...and you can pick a fight with a passive one by clicking on it from this close.
+const NEAR_RANGE: f32 = 3.0;
+// ...and then has to wait this long after an exchange ends before he can do it again.
+const ENEMY_COOLDOWN: f32 = 2.0;
+// How fast the health bar's draining chunk catches up, in hp per second.
+const HP_DRAIN_PER_SECOND: f32 = 30.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
@@ -96,7 +105,6 @@ struct Gfx {
     enemy_vertices: wgpu::Buffer,
     enemy_indices: wgpu::Buffer,
     enemy_index_count: u32,
-    enemy_visible: bool,
     mesh_vertices: wgpu::Buffer,
     mesh_indices: wgpu::Buffer,
     mesh_index_count: u32,
@@ -364,14 +372,15 @@ impl Gfx {
             contents: bytemuck::cast_slice(&outline_i),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let enemy_buffer_size = (enemy::VERTEX_COUNT * std::mem::size_of::<Vertex>()) as u64;
+        let enemy_capacity = enemy::MAX_ENEMIES * enemy::MAX_VERTICES_PER_ENEMY;
+        let enemy_buffer_size = (enemy_capacity * std::mem::size_of::<Vertex>()) as u64;
         let enemy_vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("enemy vertices"),
             size: enemy_buffer_size,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let enemy_index_list = enemy::indices();
+        let enemy_index_list = enemy::indices(enemy_capacity);
         let enemy_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("enemy indices"),
             contents: bytemuck::cast_slice(&enemy_index_list),
@@ -406,8 +415,7 @@ impl Gfx {
             outline_visible: false,
             enemy_vertices,
             enemy_indices,
-            enemy_index_count: enemy_index_list.len() as u32,
-            enemy_visible: false,
+            enemy_index_count: 0,
             mesh_vertices,
             mesh_indices,
             mesh_index_count: indices.len() as u32,
@@ -435,13 +443,13 @@ impl Gfx {
         }
     }
 
-    /// Uploads the enemy's body and health bar, or hides him with None.
-    fn set_enemy(&mut self, mesh: Option<Vec<Vertex>>) {
-        self.enemy_visible = mesh.is_some();
-        if let Some(vertices) = mesh {
-            self.queue
-                .write_buffer(&self.enemy_vertices, 0, bytemuck::cast_slice(&vertices));
-        }
+    /// Uploads every enemy's body and health bar (4-vertex quads, back to back).
+    fn set_enemies(&mut self, vertices: &[Vertex]) {
+        let capacity = enemy::MAX_ENEMIES * enemy::MAX_VERTICES_PER_ENEMY;
+        let vertices = &vertices[..vertices.len().min(capacity)];
+        self.queue
+            .write_buffer(&self.enemy_vertices, 0, bytemuck::cast_slice(vertices));
+        self.enemy_index_count = (vertices.len() / 4 * 6) as u32;
     }
 
     /// Shows crack stage 1 or 2 on a block, or hides the overlay with None.
@@ -536,7 +544,7 @@ impl Gfx {
             pass.set_index_buffer(self.mesh_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
 
-            if self.enemy_visible {
+            if self.enemy_index_count > 0 {
                 pass.set_pipeline(&self.block_pipeline);
                 pass.set_vertex_buffer(0, self.enemy_vertices.slice(..));
                 pass.set_index_buffer(self.enemy_indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -577,12 +585,16 @@ struct App {
     last_frame: Instant,
     resources: Resources,
     mine_timer: f32,
-    enemy: Option<Enemy>,
+    enemies: Vec<Enemy>,
+    /// The enemy the current (or last) exchange is against.
+    engaged: Option<u32>,
     dice: Dice,
     /// Last roll and how long ago it happened.
-    last_roll: Option<(u32, u32, f32)>,
-    /// Damage lands when the dice finish rolling.
-    roll_applied: bool,
+    combat: Combat,
+    /// Health shown on the bar; trails the real value after a hit so the loss is visible.
+    hp_shown: f32,
+    enemy_cooldown: f32,
+    was_busy: bool,
     _music: Option<music::Music>,
 }
 
@@ -596,48 +608,97 @@ impl App {
             .raycast(self.player.eye(), self.player.forward(), REACH)
     }
 
-    /// The enemy's bounding box, if he is in reach, under the crosshair, and not behind a block.
-    fn enemy_in_sights(&self) -> Option<(Vec3, Vec3)> {
-        let enemy = self.enemy.as_ref()?;
+    /// The closest enemy that is in reach, under the crosshair, and not behind a block.
+    fn enemy_in_sights(&self) -> Option<Sight> {
         let (eye, dir) = (self.player.eye(), self.player.forward());
-        let (min, max) = enemy.bounds();
-        let dist = enemy::ray_box(eye, dir, min, max).filter(|d| *d <= REACH)?;
+        let (mut best, mut best_dist) = (None, f32::INFINITY);
+        for enemy in &self.enemies {
+            let (min, max) = enemy.bounds();
+            let Some(dist) = enemy::ray_box(eye, dir, min, max).filter(|d| *d <= REACH) else {
+                continue;
+            };
+            if dist < best_dist {
+                let offset = enemy.pos() - self.player.pos;
+                best_dist = dist;
+                best = Some(Sight {
+                    id: enemy.id,
+                    hostile: enemy.hostile,
+                    min,
+                    max,
+                    distance: Vec3::new(offset.x, 0.0, offset.z).length(),
+                });
+            }
+        }
+        let sight = best?;
         if let Some((x, y, z)) = self.world.raycast(eye, dir, REACH) {
             let block_min = Vec3::new(x as f32, y as f32, z as f32);
             let block_dist = enemy::ray_box(eye, dir, block_min, block_min + Vec3::ONE);
-            if block_dist.is_some_and(|d| d < dist) {
+            if block_dist.is_some_and(|d| d < best_dist) {
                 return None;
             }
         }
-        Some((min, max))
+        Some(sight)
     }
 
-    /// One click: if the enemy is in sights, roll 2d6. The damage lands once the dice have
-    /// finished rolling on screen (see `apply_roll`).
+    /// A click picks a fight with a passive enemy you are close to and looking at. It turns
+    /// hostile, and from then on fights on its own like any other hostile one. Clicking a
+    /// hostile enemy does nothing: those start fights themselves.
     fn attack(&mut self) {
-        if self.enemy_in_sights().is_none() {
+        if self.combat.player_hp <= 0 {
             return;
         }
-        // Clicking again mid-roll cuts the old roll short, so its damage still counts.
-        self.apply_roll(true);
-        let (a, b) = self.dice.roll_2d6();
-        self.last_roll = Some((a, b, 0.0));
-        self.roll_applied = false;
-    }
-
-    fn apply_roll(&mut self, force: bool) {
-        let Some((a, b, age)) = self.last_roll else {
+        let Some(sight) = self.enemy_in_sights() else {
             return;
         };
-        if self.roll_applied || (!force && age < hud::ROLL_ANIM_SECONDS) {
+        if sight.hostile || sight.distance > NEAR_RANGE {
             return;
         }
-        self.roll_applied = true;
-        if let Some(enemy) = &mut self.enemy {
-            enemy.health -= (a + b) as i32;
-            if enemy.health <= 0 {
-                self.enemy = None;
+        // Clicking again mid-exchange skips ahead: everything in flight lands right now, and
+        // the health bar jumps to its final value instead of draining.
+        self.combat.resolve_now(&mut self.dice);
+        self.hp_shown = self.combat.player_hp as f32;
+        self.sync_enemies();
+        if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == sight.id) {
+            enemy.hostile = true;
+            self.engaged = Some(enemy.id);
+            self.combat
+                .begin(Side::Player, enemy.health, &mut self.dice);
+        }
+    }
+
+    /// Copies the fight's result onto the enemy it was against, and removes the dead.
+    fn sync_enemies(&mut self) {
+        if let Some(id) = self.engaged {
+            if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == id) {
+                enemy.health = self.combat.enemy_hp;
             }
+        }
+        self.enemies.retain(|e| e.health > 0);
+    }
+
+    /// One frame of enemy behavior: hostile ones chase the player, and the first that gets
+    /// close enough (once the cooldown allows) starts a fight.
+    fn update_enemies(&mut self, dt: f32) {
+        let player_alive = self.combat.player_hp > 0;
+        let target = self.player.pos;
+        for enemy in &mut self.enemies {
+            let chase = enemy.hostile && player_alive;
+            enemy.step(dt, target, chase, &self.world);
+        }
+
+        self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
+        if self.enemy_cooldown > 0.0 || self.combat.busy() || !player_alive {
+            return;
+        }
+        let attacker = self.enemies.iter().find(|e| {
+            let to_player = target - e.pos();
+            e.hostile
+                && Vec3::new(to_player.x, 0.0, to_player.z).length() <= MELEE_RANGE
+                && to_player.y.abs() < 2.5
+        });
+        if let Some(enemy) = attacker {
+            self.engaged = Some(enemy.id);
+            self.combat.begin(Side::Enemy, enemy.health, &mut self.dice);
         }
     }
 
@@ -759,18 +820,22 @@ impl ApplicationHandler for App {
                     self.mine_timer = 0.0;
                 }
 
-                if let Some((_, _, age)) = &mut self.last_roll {
-                    *age += dt;
+                // The fight: dice age and land, damage applies, replies roll.
+                self.combat.update(dt, &mut self.dice);
+                self.sync_enemies();
+                self.update_enemies(dt);
+                let busy = self.combat.busy();
+                if self.was_busy && !busy {
+                    self.enemy_cooldown = ENEMY_COOLDOWN;
                 }
-                self.apply_roll(false);
-                if self.last_roll.is_some_and(|(_, _, age)| age > ROLL_DISPLAY_SECONDS) {
-                    self.last_roll = None;
-                }
+                self.was_busy = busy;
+                let hp = self.combat.player_hp as f32;
+                self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(hp);
 
                 // One crack stage, halfway through the mining time.
                 let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
-                // Whatever the crosshair is on: the enemy, or else a block.
-                let enemy_target = self.enemy_in_sights();
+                // Whatever the crosshair is on: an enemy, or else a block.
+                let enemy_target = self.enemy_in_sights().map(|s| (s.min, s.max));
                 let target = self.block_in_sights();
                 let crack = target
                     .filter(|_| stage >= 1)
@@ -785,17 +850,23 @@ impl ApplicationHandler for App {
                 });
 
                 let look_at = self.player.pos;
-                let enemy_mesh = self.enemy.as_ref().map(|e| e.mesh(look_at));
+                let enemy_mesh: Vec<Vertex> = self
+                    .enemies
+                    .iter()
+                    .flat_map(|e| e.mesh(look_at))
+                    .collect();
 
                 if let Some(gfx) = &mut self.gfx {
                     gfx.set_outline(outline);
                     gfx.set_crack(crack);
-                    gfx.set_enemy(enemy_mesh);
+                    gfx.set_enemies(&enemy_mesh);
                     let hud = hud::build(
                         gfx.config.width,
                         gfx.config.height,
                         self.resources.as_array(),
-                        self.last_roll,
+                        self.combat.player_roll.map(|r| r.view()),
+                        self.combat.enemy_roll.map(|r| r.view()),
+                        (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
                     );
                     gfx.render(self.player.eye(), self.player.forward(), &hud);
                 }
@@ -826,7 +897,12 @@ fn main() {
 
     let world = World::generate(seed);
     let player = Player::new(world.spawn_point());
-    let enemy_spot = world.enemy_spot();
+    // A skeleton straight ahead of the spawn point, and a deer off to the west (the grass).
+    let (cx, cz) = (world::SIZE_X as i32 / 2, world::SIZE_Z as i32 / 2);
+    let enemies = vec![
+        Enemy::new(1, Kind::Skeleton, world.open_spot(cx, cz - 7)),
+        Enemy::new(2, Kind::Deer, world.open_spot(cx - 9, cz - 3)),
+    ];
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -838,10 +914,13 @@ fn main() {
         last_frame: Instant::now(),
         resources: Resources::default(),
         mine_timer: 0.0,
-        enemy: Some(Enemy::new(enemy_spot)),
+        enemies,
+        engaged: None,
         dice: Dice::new(),
-        last_roll: None,
-        roll_applied: true,
+        combat: Combat::new(),
+        hp_shown: MAX_PLAYER_HP as f32,
+        enemy_cooldown: 0.0,
+        was_busy: false,
         _music: music::Music::start(),
     };
     event_loop.run_app(&mut app).unwrap();

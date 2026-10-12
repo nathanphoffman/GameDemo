@@ -1,11 +1,12 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 18; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 20; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
-                            // 13 bone, 14 skull face, 15 ribs, 16 red, 17 green (health bar)
+                            // 13 bone, 14 skull face, 15 ribs, 16 red, 17 green (health bar),
+                            // 18 deer fur, 19 deer face
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -15,6 +16,7 @@ const BARK: [f32; 3] = [104.0, 82.0, 52.0];
 const WOOD: [f32; 3] = [170.0, 138.0, 86.0];
 const LEAVES: [f32; 3] = [58.0, 128.0, 38.0];
 const NEEDLES: [f32; 3] = [28.0, 82.0, 52.0];
+const FUR: [f32; 3] = [160.0, 108.0, 64.0];
 const BONE: [f32; 3] = [226.0, 222.0, 205.0];
 const SNOW: [f32; 3] = [238.0, 243.0, 250.0];
 
@@ -119,6 +121,16 @@ fn tile(layer: u32) -> Vec<u8> {
                     shaded(base, x, y, 32)
                 }
                 13 => shaded(BONE, x, y, 50),
+                18 => shaded(FUR, x, y, 53),
+                19 => {
+                    let eye = ((3..6).contains(&x) || (10..13).contains(&x)) && (5..8).contains(&y);
+                    let nose = (6..10).contains(&x) && (11..14).contains(&y);
+                    if eye || nose {
+                        [24, 18, 16, 255]
+                    } else {
+                        shaded(FUR, x, y, 54)
+                    }
+                }
                 14 => {
                     let eye = (3..6).contains(&x) || (10..13).contains(&x);
                     let socket = eye && (5..8).contains(&y);
