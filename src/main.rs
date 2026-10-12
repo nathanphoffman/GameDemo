@@ -6,7 +6,7 @@ mod music;
 mod textures;
 
 // The game's rules live in the library; these keep the `crate::world::...` style paths working.
-use game_core::{biome, combat, effects, enemy, player, resources, weather, world};
+use game_core::{biome, combat, effects, enemy, game, weather, world};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

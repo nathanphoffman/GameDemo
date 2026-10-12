@@ -1,11 +1,8 @@
 //! The game itself: state, and what happens each frame and on each input.
 
-mod blocks;
-mod fighting;
 mod frame;
 mod input;
 mod menu;
-mod update;
 
 use std::time::Instant;
 
@@ -21,49 +18,32 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 use std::sync::Arc;
 
-use crate::combat::{Candidate, Combat, Side, MAX_PLAYER_HP};
-use crate::effects::{self, Effect, Fires, STAIR_STEPS};
-use crate::enemy::{self, Dice, Enemy, Kind, Sight};
+use crate::combat::MAX_PLAYER_HP;
+use crate::effects::{self, Effect};
+use crate::game::{Command, Event, Game, PlayerId, PlayerInput, PlayerState, MINE_INTERVAL};
 use crate::gfx::{Gfx, FOV_Y_DEGREES};
 use crate::hud::{self, HudInfo};
-use crate::music;
-use crate::player::{self, Player};
-use crate::resources::{Converter, Resources};
-use crate::weather::Weather;
 use crate::mesh::{self, Vertex};
-use crate::world::{self, World};
+use crate::music;
+use crate::world;
 use input::Keys;
 
-const WALK_SPEED: f32 = 5.0;
-const SPRINT_SPEED: f32 = 8.0;
 const MOUSE_SENSITIVITY: f32 = 0.0022;
-const MINE_INTERVAL: f32 = 0.55; // seconds of holding to mine one block
-const REACH: f32 = 5.0; // blocks
-// Hostile creatures can attack you from this close (horizontally)...
-const MELEE_RANGE: f32 = 2.3;
-// ...you can attack them from this close (and click a passive one to start a fight).
-const NEAR_RANGE: f32 = 3.0;
-// A forge this close (in blocks) doubles the conversion speed; a furnace quadruples it from
-// further away.
-const FORGE_RANGE: f32 = 6.0;
-const FURNACE_RANGE: f32 = 10.0;
-// After a round ends, the next one can't start for this long.
-const ROUND_PAUSE: f32 = 2.0;
 // How fast the health bar's draining chunk catches up, in hp per second.
 const HP_DRAIN_PER_SECOND: f32 = 30.0;
 
 pub(crate) struct App {
     gfx: Option<Gfx>,
-    world: World,
-    player: Player,
+    /// The game's state and rules. Everything the player does goes in as a `Command`.
+    game: Game,
+    /// Which of the game's players this window plays.
+    me: PlayerId,
+    /// What this player is holding down and looking at; sent to the game whenever it changes.
+    input: PlayerInput,
     keys: Keys,
     last_frame: Instant,
     /// When the game started, for things that move with time (the clouds).
     started: Instant,
-    weather: Weather,
-    resources: Resources,
-    converter: Converter,
-    fires: Fires,
     /// The apply menu, open on this block, or None.
     menu: Option<(i32, i32, i32)>,
     /// What right click does: `None` clones the block it is aimed at (normal block placing),
@@ -71,63 +51,83 @@ pub(crate) struct App {
     selected_dense: Option<usize>,
     /// Last known mouse position in window pixels (only meaningful while Ctrl frees it).
     cursor_pos: (f32, f32),
-    mine_timer: f32,
-    enemies: Vec<Enemy>,
-    dice: Dice,
-    /// Last roll and how long ago it happened.
-    combat: Combat,
     /// Health shown on the bar; trails the real value after a hit so the loss is visible.
     hp_shown: f32,
-    round_pause: f32,
-    /// Seconds until the next try at spawning a creature near the player.
-    spawn_timer: f32,
-    spawn_dice: Dice,
-    next_enemy_id: u32,
     /// The window has keyboard focus (and so should own the mouse).
     focused: bool,
     /// The OS really locked the pointer. If not, it is only confined, and the game keeps
     /// pulling it back to the middle of the window so it can't wander onto another monitor.
     cursor_locked: bool,
-    was_busy: bool,
     music: Option<music::Music>,
 }
 
 impl App {
     fn new(seed: u32) -> Self {
-        let world = World::generate(seed);
-        let player = Player::new(world.spawn_point());
-        // A deer close to the spawn point; the rest of the creatures turn up as you explore.
-        let (cx, cz) = (world::SIZE_X as i32 / 2, world::SIZE_Z as i32 / 2);
-        let enemies = vec![Enemy::new(1, Kind::Deer, world.open_spot(cx - 9, cz - 3))];
+        let mut game = Game::new(seed);
+        let me = game.add_player();
         App {
             gfx: None,
-            world,
-            player,
+            game,
+            me,
+            input: PlayerInput::default(),
             keys: Keys::default(),
             last_frame: Instant::now(),
             started: Instant::now(),
-            weather: Weather::new(seed ^ 0x5EA7),
-            // A big pile of everything to try things out with. Use `Resources::default()` for a
-            // normal start.
-            resources: Resources::test_kit(),
-            converter: Converter::default(),
-            fires: Fires::default(),
             menu: None,
             selected_dense: None,
             cursor_pos: (0.0, 0.0),
-            mine_timer: 0.0,
-            enemies,
-            dice: Dice::new(),
-            combat: Combat::new(),
             hp_shown: MAX_PLAYER_HP as f32,
-            round_pause: 0.0,
-            spawn_timer: 3.0,
-            spawn_dice: Dice::new(),
-            next_enemy_id: 2,
             focused: true,
             cursor_locked: false,
-            was_busy: false,
             music: music::Music::start(),
+        }
+    }
+
+    /// The player this window plays.
+    fn me(&self) -> &PlayerState {
+        self.game.player(self.me).expect("the local player is in the game")
+    }
+
+    /// Sends the current keys and look direction to the game.
+    fn send_input(&mut self) {
+        self.game.apply(self.me, Command::SetInput(self.input));
+    }
+
+    /// Starts or stops mining (the left button held).
+    fn set_mining(&mut self, mining: bool) {
+        if self.input.mining != mining {
+            self.input.mining = mining;
+            self.send_input();
+        }
+    }
+
+    /// Does something in the game, then shows what came of it.
+    fn command(&mut self, command: Command) {
+        self.game.apply(self.me, command);
+        self.show_changes();
+    }
+
+    /// Plays the sounds of what happened and sends the changed chunks of the world to the GPU.
+    fn show_changes(&mut self) {
+        for event in self.game.take_events() {
+            match event {
+                Event::Dug { player, block, ice } if player == self.me => {
+                    if let Some(music) = &self.music {
+                        music.dig(block, ice);
+                    }
+                }
+                Event::RoundSkipped { player } if player == self.me => {
+                    // The health bar jumps to its final value instead of draining.
+                    self.hp_shown = self.me().combat.player_hp as f32;
+                }
+                _ => {}
+            }
+        }
+        for (cx, cz) in self.game.world.take_dirty() {
+            if let Some(gfx) = &mut self.gfx {
+                let (vertices, indices) = mesh::terrain::build_chunk(&self.game.world, cx, cz);
+                gfx.set_chunk(cx, cz, &vertices, &indices);
+            }
         }
     }
 

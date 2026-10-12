@@ -1,4 +1,4 @@
-//! The apply menu and applying a resource to a block.
+//! The apply menu.
 
 use super::*;
 
@@ -8,9 +8,9 @@ impl App {
         if self.ui_open() {
             return;
         }
-        if let Some(target) = self.block_in_sights() {
+        if let Some(target) = self.game.block_in_sights(self.me) {
             self.menu = Some(target);
-            self.keys.mining = false;
+            self.set_mining(false);
             self.release_cursor();
         }
     }
@@ -42,16 +42,9 @@ impl App {
         let Some(pos) = self.menu else {
             return;
         };
-        if self.apply_dense(kind, pos) {
+        if self.game.can_apply(self.me, kind, pos) {
+            self.command(Command::ApplyAt { kind, pos });
             self.close_menu();
-        }
-    }
-
-    /// Right click with a dense resource selected: applies it to the block under the
-    /// crosshair, just like picking it from the menu.
-    pub(crate) fn apply_selected(&mut self, kind: usize) {
-        if let Some(pos) = self.block_in_sights() {
-            self.apply_dense(kind, pos);
         }
     }
 }

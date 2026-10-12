@@ -11,33 +11,26 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
-        self.move_player(dt);
-
-        self.update_mining(dt);
-
-        self.update_fight(dt);
+        self.game.update(dt);
+        self.show_changes();
+        let hp = self.me().combat.player_hp as f32;
+        self.hp_shown = (self.hp_shown - HP_DRAIN_PER_SECOND * dt).max(hp);
 
         // One crack stage, halfway through the mining time.
-        let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
-        let (px, pz) = (self.player.pos.x.floor() as i32, self.player.pos.z.floor() as i32);
-        self.weather.biome = self.world.biome(px, pz);
-        self.weather.snowing = self.weather.biome == Biome::Snow;
-        self.weather.underwater = self.world.in_water(self.player.eye());
-        self.weather.update(dt);
+        let stage = if self.me().mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+        let weather = &self.game.weather;
         if let Some(music) = &mut self.music {
             // Rain you hear is snow in the cold; either way it is as loud as the rain is.
-            let amount = self.weather.params.rain;
-            let snowing = self.weather.snowing;
-            let creepy = matches!(self.weather.biome, Biome::Volcanic | Biome::Swamp);
+            let amount = weather.params.rain;
+            let snowing = weather.snowing;
+            let creepy = matches!(weather.biome, Biome::Volcanic | Biome::Swamp);
             let (rain, snow) = if snowing { (0.0, amount) } else { (amount, 0.0) };
             music.update(rain, snow, if creepy { 1.0 } else { 0.0 }, dt);
         }
 
-        let conversion_boost = self.update_background(dt);
-
         // Whatever the crosshair is on: an enemy, or else a block.
-        let enemy_target = self.enemy_in_sights().map(|s| (s.min, s.max));
-        let target = self.block_in_sights();
+        let enemy_target = self.game.enemy_in_sights(self.me).map(|s| (s.min, s.max));
+        let target = self.game.block_in_sights(self.me);
         let crack = target
             .filter(|_| stage >= 1)
             .map(|block| (block, stage));
@@ -50,14 +43,16 @@ impl App {
             })
         });
 
-        let look_at = self.player.pos;
-        let enemy_rolls: Vec<(u32, u32, f32)> = self
+        let player = self.game.player(self.me).expect("the local player is in the game");
+        let look_at = player.body.pos;
+        let enemy_rolls: Vec<(u32, u32, f32)> = player
             .combat
             .enemy_rolls
             .iter()
             .map(|r| r.view())
             .collect();
         let enemy_mesh: Vec<Vertex> = self
+            .game
             .enemies
             .iter()
             .flat_map(|e| mesh::creature::enemy_mesh(e, e.facing(look_at)))
@@ -77,27 +72,27 @@ impl App {
                 gfx.config.width,
                 gfx.config.height,
                 &HudInfo {
-                    resources: self.resources.as_array(),
-                    dense: self.resources.dense,
+                    resources: player.resources.as_array(),
+                    dense: player.resources.dense,
                     menu: menu_labels,
-                    converting: self
+                    converting: player
                         .converter
                         .selected()
-                        .map(|kind| (kind, self.converter.fraction())),
+                        .map(|kind| (kind, player.converter.fraction())),
                     ctrl_held: self.keys.ctrl,
-                    weather_label: self.weather.label(),
+                    weather_label: self.game.weather.label(),
                     selection: self
                         .selected_dense
-                        .map(|kind| (kind, self.resources.dense[kind])),
+                        .map(|kind| (kind, player.resources.dense[kind])),
                     target_label,
-                    conversion_boost,
-                    player_roll: self.combat.player_roll.map(|r| r.view()),
+                    conversion_boost: player.conversion_boost,
+                    player_roll: player.combat.player_roll.map(|r| r.view()),
                     enemy_rolls: &enemy_rolls,
-                    hp: (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
+                    hp: (self.hp_shown, player.combat.player_hp, MAX_PLAYER_HP),
                 },
             );
             let time = self.started.elapsed().as_secs_f32();
-            gfx.render(self.player.eye(), self.player.forward(), time, &self.weather, &hud);
+            gfx.render(player.body.eye(), player.body.forward(), time, &self.game.weather, &hud);
         }
     }
 
@@ -121,20 +116,21 @@ impl App {
     fn target_label(&self) -> Option<(&'static str, f32, f32)> {
         // With a dense resource selected: what right click would build on the block
         // the crosshair is on, written over that block.
-        match (self.selected_dense, self.block_in_sights()) {
+        let player = self.me();
+        match (self.selected_dense, self.game.block_in_sights(self.me)) {
             (Some(kind), Some(pos)) if !self.ui_open() => {
                 // Only if there is enough of it (a staircase needs one per step).
                 let enough = |effect: &Effect| {
-                    self.resources.dense[kind] >= effect.dense_cost()
+                    player.resources.dense[kind] >= effect.dense_cost()
                 };
-                self.effect_at(kind, pos).filter(enough).and_then(|effect| {
+                self.game.effect_at(self.me, kind, pos).filter(enough).and_then(|effect| {
                     let (width, height) = self
                         .gfx
                         .as_ref()
                         .map_or((1.0, 1.0), |g| (g.config.width as f32, g.config.height as f32));
                     let view = Mat4::look_to_rh(
-                        self.player.eye(),
-                        self.player.forward(),
+                        player.body.eye(),
+                        player.body.forward(),
                         Vec3::Y,
                     );
                     let proj = Mat4::perspective_rh(
@@ -160,7 +156,8 @@ impl App {
             let mut labels = [None; 5];
             for (kind, label) in labels.iter_mut().enumerate() {
                 *label = self
-                    .effect_at(kind, pos)
+                    .game
+                    .effect_at(self.me, kind, pos)
                     .map(|e| (e.label(), e.dense_cost()));
             }
             labels

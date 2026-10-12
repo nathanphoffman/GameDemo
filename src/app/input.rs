@@ -4,14 +4,6 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Keys {
-    pub(super) w: bool,
-    pub(super) a: bool,
-    pub(super) s: bool,
-    pub(super) d: bool,
-    pub(super) sprint: bool,
-    pub(super) jump: bool,
-    /// Left mouse button held.
-    pub(super) mining: bool,
     /// Ctrl held: the mouse is free to click the resource list.
     pub(super) ctrl: bool,
 }
@@ -21,29 +13,29 @@ impl App {
     /// resource (with Ctrl), or starts and stops mining and attacking.
     pub(crate) fn left_click(&mut self, pressed: bool) {
         if self.menu.is_some() {
-            self.keys.mining = false;
+            self.set_mining(false);
             if pressed {
                 self.menu_click();
             }
         } else if self.keys.ctrl {
             // Ctrl + click on a resource row picks what the converter works on.
-            self.keys.mining = false;
+            self.set_mining(false);
             if pressed {
                 let height = self.gfx.as_ref().map_or(0, |g| g.config.height);
                 let (x, y) = self.cursor_pos;
                 if let Some(row) = hud::resource_row_at(height, x, y) {
-                    self.converter.toggle(row);
+                    self.command(Command::ToggleConversion(row));
                 }
             }
         } else {
-            self.keys.mining = pressed;
+            self.set_mining(pressed);
             if pressed {
                 if self.focused {
                     // A click is a good moment to retake the mouse if we somehow lost it.
                     self.grab_cursor();
                 }
                 // Every click is an attack, if the enemy is what the crosshair is on.
-                self.attack();
+                self.command(Command::Attack);
             }
         }
     }
@@ -51,16 +43,16 @@ impl App {
     /// A key went down or up. Esc backs out of the menu first, and only then quits.
     pub(crate) fn key_changed(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, down: bool) {
         match code {
-            KeyCode::KeyW => self.keys.w = down,
-            KeyCode::KeyA => self.keys.a = down,
-            KeyCode::KeyS => self.keys.s = down,
-            KeyCode::KeyD => self.keys.d = down,
-            KeyCode::ShiftLeft => self.keys.sprint = down,
-            KeyCode::Space => self.keys.jump = down,
+            KeyCode::KeyW => self.input.forward = down,
+            KeyCode::KeyA => self.input.left = down,
+            KeyCode::KeyS => self.input.back = down,
+            KeyCode::KeyD => self.input.right = down,
+            KeyCode::ShiftLeft => self.input.sprint = down,
+            KeyCode::Space => self.input.jump = down,
             KeyCode::ControlLeft | KeyCode::ControlRight => {
                 if down != self.keys.ctrl {
                     self.keys.ctrl = down;
-                    self.keys.mining = false;
+                    self.set_mining(false);
                     // Free the pointer so it can be moved to the list; take it
                     // back (and recenter) when Ctrl is let go.
                     if down {
@@ -81,7 +73,7 @@ impl App {
             }
             _ => {}
         }
-
+        self.send_input();
     }
 }
 
@@ -102,11 +94,11 @@ impl ApplicationHandler for App {
         let mut gfx = Gfx::new(window);
         for cz in 0..world::CHUNKS_Z {
             for cx in 0..world::CHUNKS_X {
-                let (vertices, indices) = mesh::terrain::build_chunk(&self.world, cx, cz);
+                let (vertices, indices) = mesh::terrain::build_chunk(&self.game.world, cx, cz);
                 gfx.set_chunk(cx, cz, &vertices, &indices);
             }
         }
-        self.world.take_dirty();
+        self.game.world.take_dirty();
         self.gfx = Some(gfx);
         self.grab_cursor();
         self.last_frame = Instant::now();
@@ -117,10 +109,11 @@ impl ApplicationHandler for App {
             return; // the mouse is pointing at the HUD, not turning the camera
         }
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            self.player.yaw += dx as f32 * MOUSE_SENSITIVITY;
-            self.player.pitch -= dy as f32 * MOUSE_SENSITIVITY;
+            self.input.yaw += dx as f32 * MOUSE_SENSITIVITY;
+            self.input.pitch -= dy as f32 * MOUSE_SENSITIVITY;
             let limit = 89.0_f32.to_radians();
-            self.player.pitch = self.player.pitch.clamp(-limit, limit);
+            self.input.pitch = self.input.pitch.clamp(-limit, limit);
+            self.send_input();
         }
     }
 
@@ -141,6 +134,12 @@ impl ApplicationHandler for App {
                 } else {
                     // Let go of everything so nothing stays "held" while we're away.
                     self.keys = Keys::default();
+                    self.input = PlayerInput {
+                        yaw: self.input.yaw,
+                        pitch: self.input.pitch,
+                        ..PlayerInput::default()
+                    };
+                    self.send_input();
                     self.release_cursor();
                 }
             }
@@ -166,8 +165,8 @@ impl ApplicationHandler for App {
             } => {
                 if !self.ui_open() {
                     match self.selected_dense {
-                        None => self.place_block(),
-                        Some(kind) => self.apply_selected(kind),
+                        None => self.command(Command::PlaceBlock),
+                        Some(kind) => self.command(Command::ApplyToTarget { kind }),
                     }
                 }
             }

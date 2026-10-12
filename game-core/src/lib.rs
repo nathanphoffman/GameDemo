@@ -5,6 +5,7 @@ pub mod biome;
 pub mod combat;
 pub mod effects;
 pub mod enemy;
+pub mod game;
 pub mod player;
 pub mod resources;
 pub mod weather;
