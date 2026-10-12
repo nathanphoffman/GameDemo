@@ -492,7 +492,7 @@ impl Gfx {
         self.mesh_index_count = indices.len() as u32;
     }
 
-    fn render(&mut self, eye: Vec3, forward: Vec3, hud: &[HudVertex]) {
+    fn render(&mut self, eye: Vec3, forward: Vec3, time: f32, hud: &[HudVertex]) {
         let aspect = self.config.width as f32 / self.config.height as f32;
         let view = Mat4::look_to_rh(eye, forward, Vec3::Y);
         let proj = Mat4::perspective_rh(FOV_Y_DEGREES.to_radians(), aspect, 0.05, 1000.0);
@@ -500,7 +500,8 @@ impl Gfx {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-            cam: [eye.x, eye.y, eye.z, 1.0],
+            // The fourth number is the time, which makes the clouds drift.
+            cam: [eye.x, eye.y, eye.z, time],
         };
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -593,6 +594,8 @@ struct App {
     player: Player,
     keys: Keys,
     last_frame: Instant,
+    /// When the game started, for things that move with time (the clouds).
+    started: Instant,
     resources: Resources,
     converter: Converter,
     fires: Fires,
@@ -1257,7 +1260,8 @@ impl ApplicationHandler for App {
                             hp: (self.hp_shown, self.combat.player_hp, MAX_PLAYER_HP),
                         },
                     );
-                    gfx.render(self.player.eye(), self.player.forward(), &hud);
+                    let time = self.started.elapsed().as_secs_f32();
+                    gfx.render(self.player.eye(), self.player.forward(), time, &hud);
                 }
             }
             _ => {}
@@ -1301,6 +1305,7 @@ fn main() {
         player,
         keys: Keys::default(),
         last_frame: Instant::now(),
+        started: Instant::now(),
         // A big pile of everything to try things out with. Use `Resources::default()` for a
         // normal start.
         resources: Resources::test_kit(),

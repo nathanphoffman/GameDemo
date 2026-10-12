@@ -11,6 +11,41 @@ const ZENITH: vec3<f32> = vec3<f32>(0.10, 0.36, 0.85);
 
 // ---- sky: fullscreen triangle, colour from view direction ----
 
+// Clouds are a flat layer of drifting noise high above the world. `g.cam.w` is the time in
+// seconds.
+const CLOUD_HEIGHT: f32 = 100.0;
+const CLOUD_SCALE: f32 = 70.0;   // blocks per noise cell
+const CLOUD_DRIFT: vec2<f32> = vec2<f32>(0.018, 0.007); // noise cells per second
+
+fn hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q += dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn cloud_density(p: vec2<f32>) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i = 0; i < 4; i++) {
+        sum += value_noise(q) * amp;
+        q = q * 2.03 + vec2<f32>(17.1, 9.2);
+        amp *= 0.5;
+    }
+    return smoothstep(0.48, 0.72, sum);
+}
+
 struct SkyOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -30,7 +65,20 @@ fn sky_fs(in: SkyOut) -> @location(0) vec4<f32> {
     let far = g.inv_view_proj * vec4(in.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - g.cam.xyz);
     let t = pow(clamp(dir.y, 0.0, 1.0), 0.5);
-    return vec4(mix(HORIZON, ZENITH, t), 1.0);
+    var color = mix(HORIZON, ZENITH, t);
+
+    // Clouds: where the view ray crosses the cloud layer. They fade out toward the horizon,
+    // where the layer is very far away and would just shimmer.
+    if (dir.y > 0.01) {
+        let dist = (CLOUD_HEIGHT - g.cam.y) / dir.y;
+        let spot = (g.cam.xz + dir.xz * dist) / CLOUD_SCALE + CLOUD_DRIFT * g.cam.w;
+        let density = cloud_density(spot);
+        let fade = smoothstep(0.01, 0.2, dir.y);
+        // Thicker parts are a little greyer underneath.
+        let cloud_color = mix(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.80, 0.84, 0.90), density * density);
+        color = mix(color, cloud_color, density * fade * 0.92);
+    }
+    return vec4(color, 1.0);
 }
 
 // ---- blocks ----
