@@ -1,6 +1,6 @@
 # GameDemo
 
-A small first-person voxel demo written in Rust. You spawn on randomly generated hills made of blocks, with grass and snow zones that blend into each other, and can walk and jump around them.
+A small first-person voxel demo written in Rust. You spawn on randomly generated hills made of blocks, with grass and snow zones that blend into each other, trees, and can walk and jump around them.
 
 Built from scratch with `winit` (window and input), `wgpu` (graphics), and `glam` (math).
 

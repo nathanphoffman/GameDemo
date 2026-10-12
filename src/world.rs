@@ -8,13 +8,16 @@ pub const SIZE_Y: usize = 64;
 /// Small margin so a box resting exactly on a block boundary isn't treated as inside it.
 pub const EPS: f32 = 1e-4;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Block {
     Air,
     Grass,
     Dirt,
     Snow,
     Stone,
+    Log,
+    Leaves,
+    PineLeaves,
 }
 
 #[repr(C)]
@@ -91,14 +94,14 @@ fn snow_amount(x: usize, z: usize, seed: u32) -> f32 {
 fn hill_height(x: f32, z: f32, seed: u32) -> f32 {
     let n = fbm_with(x / 75.0, z / 75.0, seed, 2, 0.35, false);
     let t = ((n - 0.3) / 0.4).clamp(0.0, 1.0);
-    7.0 + t * 7.0
+    7.0 + t * 10.0
 }
 
 /// Tall ridged ranges with peaks, separated by deep valleys.
 fn mountain_height(x: f32, z: f32, seed: u32) -> f32 {
     let m = fbm_with(x / 90.0, z / 90.0, seed ^ 0xA11, 3, 0.45, true);
     let t = ((m - 0.2) / 0.7).clamp(0.0, 1.0);
-    2.0 + 50.0 * t.powf(1.7)
+    3.0 + 38.0 * t.powf(1.5)
 }
 
 struct Face {
@@ -184,7 +187,105 @@ impl World {
                 }
             }
         }
-        World { blocks, heights }
+        let mut world = World { blocks, heights };
+        world.plant_trees(seed);
+        world
+    }
+
+    fn set_if_air(&mut self, x: i32, y: i32, z: i32, block: Block) {
+        if x < 0 || y < 0 || z < 0 || x >= SIZE_X as i32 || y >= SIZE_Y as i32 || z >= SIZE_Z as i32
+        {
+            return;
+        }
+        let i = Self::index(x as usize, y as usize, z as usize);
+        if self.blocks[i] == Block::Air {
+            self.blocks[i] = block;
+        }
+    }
+
+    /// Oaks on grass (common), pines on snow (rarer, and rarer still as the ground gets high).
+    /// Each cell of a coarse grid gets at most one tree, which keeps trees from piling up.
+    fn plant_trees(&mut self, seed: u32) {
+        let (spawn_x, spawn_z) = (SIZE_X / 2, SIZE_Z / 2);
+        for (cell, is_pine) in [(5usize, false), (7usize, true)] {
+            for cz in 0..SIZE_Z / cell {
+                for cx in 0..SIZE_X / cell {
+                    let salt = if is_pine { 0x71AE } else { 0x0A4B };
+                    let (cx32, cz32) = (cx as u32, cz as u32);
+                    let x = cx * cell + (hash(cx32, cz32, seed ^ salt) * cell as f32) as usize;
+                    let z = cz * cell + (hash(cx32, cz32, seed ^ salt ^ 1) * cell as f32) as usize;
+                    // Keep canopies inside the world and the spawn point clear.
+                    if x < 3 || z < 3 || x + 3 >= SIZE_X || z + 3 >= SIZE_Z {
+                        continue;
+                    }
+                    if x.abs_diff(spawn_x) <= 4 && z.abs_diff(spawn_z) <= 4 {
+                        continue;
+                    }
+                    let ground = self.heights[z * SIZE_X + x] as i32;
+                    let top = self.get(x as i32, ground - 1, z as i32);
+                    let roll = hash(cx32, cz32, seed ^ salt ^ 2);
+                    let size_roll = hash(cx32, cz32, seed ^ salt ^ 3);
+                    let (x, z) = (x as i32, z as i32);
+                    if is_pine {
+                        if top != Block::Snow {
+                            continue;
+                        }
+                        // Full chance on low ground, fading to none by height 30.
+                        let high = ((ground as f32 - 12.0) / 18.0).clamp(0.0, 1.0);
+                        if roll < 0.55 * (1.0 - high) {
+                            self.plant_pine(x, ground, z, size_roll);
+                        }
+                    } else if top == Block::Grass && roll < 0.6 {
+                        self.plant_oak(x, ground, z, size_roll);
+                    }
+                }
+            }
+        }
+    }
+
+    fn plant_oak(&mut self, x: i32, ground: i32, z: i32, size_roll: f32) {
+        let trunk = 4 + (size_roll * 2.0) as i32; // 4 or 5
+        for dy in 0..trunk {
+            self.set_if_air(x, ground + dy, z, Block::Log);
+        }
+        // Rounded canopy: two wide layers, then a smaller cap.
+        for (dy, radius) in [(trunk - 2, 2i32), (trunk - 1, 2), (trunk, 1), (trunk + 1, 1)] {
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    let corner = dx.abs() == radius && dz.abs() == radius;
+                    if corner && (radius == 2 || dy == trunk + 1) {
+                        continue;
+                    }
+                    self.set_if_air(x + dx, ground + dy, z + dz, Block::Leaves);
+                }
+            }
+        }
+    }
+
+    fn plant_pine(&mut self, x: i32, ground: i32, z: i32, size_roll: f32) {
+        let trunk = 6 + (size_roll * 3.0) as i32; // 6 to 8
+        for dy in 0..trunk {
+            self.set_if_air(x, ground + dy, z, Block::Log);
+        }
+        // Tiered cone: widest near the bottom, with a single needle at the very top.
+        let top = ground + trunk;
+        for y in (ground + 2)..=top {
+            let d = top - y;
+            let radius: i32 = match d {
+                0 => 0,
+                1 | 2 => 1,
+                n if n % 2 == 1 => 2,
+                _ => 1,
+            };
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    if radius == 2 && dx.abs() == 2 && dz.abs() == 2 {
+                        continue;
+                    }
+                    self.set_if_air(x + dx, y, z + dz, Block::PineLeaves);
+                }
+            }
+        }
     }
 
     /// Picks grass or snow for a column. The jitter makes the border a speckled mix.
@@ -269,6 +370,10 @@ impl World {
                             (Block::Snow, 0) => 3.0,
                             (Block::Snow, 1) => 4.0,
                             (Block::Stone, _) => 5.0,
+                            (Block::Log, 1) => 6.0,
+                            (Block::Log, _) => 7.0,
+                            (Block::Leaves, _) => 8.0,
+                            (Block::PineLeaves, _) => 9.0,
                             _ => 2.0,
                         };
                         let base = vertices.len() as u32;
@@ -313,8 +418,8 @@ mod tests {
                     }
                 }
             }
-            assert!(hill_max <= 20, "hills too tall: {hill_max}");
-            assert!(mountain_max >= 35, "mountains too short: {mountain_max}");
+            assert!(hill_max <= 22, "hills too tall: {hill_max}");
+            assert!(mountain_max >= 30, "mountains too short: {mountain_max}");
             assert!(mountain_min <= 6, "valleys too shallow: {mountain_min}");
         }
     }
@@ -335,6 +440,50 @@ mod tests {
             assert!(snow_per_third[0] < snow_per_third[2], "{snow_per_third:?}");
             assert!(snow_per_third[2] > 1000, "{snow_per_third:?}");
             assert!(snow_per_third[0] < SIZE_X * SIZE_Z / 3 - 1000, "{snow_per_third:?}");
+        }
+    }
+
+    #[test]
+    fn oaks_are_common_and_pines_are_rarer_and_fade_with_height() {
+        for seed in [1, 2, 3, 99] {
+            let w = World::generate(seed);
+            let (mut oaks, mut pines) = (0, 0);
+            // [trees, snow columns] for low and high ground.
+            let (mut low, mut high) = ([0u32; 2], [0u32; 2]);
+            for z in 0..SIZE_Z {
+                for x in 0..SIZE_X {
+                    let ground = w.heights[z * SIZE_X + x] as i32;
+                    let (xi, zi) = (x as i32, z as i32);
+                    let below = w.get(xi, ground - 1, zi);
+                    let has_tree = w.get(xi, ground, zi) == Block::Log;
+                    if has_tree && below == Block::Grass {
+                        oaks += 1;
+                    }
+                    if has_tree && below == Block::Snow {
+                        pines += 1;
+                    }
+                    if below == Block::Snow {
+                        let band = if ground <= 14 {
+                            Some(&mut low)
+                        } else if ground >= 26 {
+                            Some(&mut high)
+                        } else {
+                            None
+                        };
+                        if let Some(b) = band {
+                            b[1] += 1;
+                            b[0] += has_tree as u32;
+                        }
+                    }
+                }
+            }
+            assert!(oaks > pines * 2, "oaks {oaks} pines {pines}");
+            assert!(pines > 20, "pines {pines}");
+            let density = |b: [u32; 2]| b[0] as f32 / b[1].max(1) as f32;
+            assert!(density(high) < density(low) * 0.3, "low {low:?} high {high:?}");
+            // Spawn is clear.
+            let s = w.spawn_point();
+            assert_eq!(w.get(s.x as i32, s.y as i32, s.z as i32), Block::Air);
         }
     }
 }

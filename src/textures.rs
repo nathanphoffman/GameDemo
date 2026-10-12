@@ -1,12 +1,17 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 6; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone
+pub const LAYERS: u32 = 10; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+                            // 6 log side, 7 log top, 8 leaves, 9 pine needles
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
 const DIRT: [f32; 3] = [134.0, 96.0, 67.0];
 const STONE: [f32; 3] = [122.0, 124.0, 130.0];
+const BARK: [f32; 3] = [104.0, 82.0, 52.0];
+const WOOD: [f32; 3] = [170.0, 138.0, 86.0];
+const LEAVES: [f32; 3] = [58.0, 128.0, 38.0];
+const NEEDLES: [f32; 3] = [28.0, 82.0, 52.0];
 const SNOW: [f32; 3] = [238.0, 243.0, 250.0];
 
 fn shaded(base: [f32; 3], x: u32, y: u32, seed: u32) -> [u8; 4] {
@@ -45,6 +50,26 @@ fn tile(layer: u32) -> Vec<u8> {
                     }
                 }
                 5 => shaded(STONE, x, y, 16),
+                // Bark: vertical streaks, so shade by column.
+                6 => {
+                    let f = 0.75 + 0.5 * hash(x, 0, 30);
+                    let g = 0.9 + 0.2 * hash(x, y, 31);
+                    let k = f * g;
+                    [
+                        (BARK[0] * k).min(255.0) as u8,
+                        (BARK[1] * k).min(255.0) as u8,
+                        (BARK[2] * k).min(255.0) as u8,
+                        255,
+                    ]
+                }
+                // Cut end: light and dark rings.
+                7 => {
+                    let ring = (x as f32 - 7.5).abs().max((y as f32 - 7.5).abs()) as u32;
+                    let base = if ring % 2 == 0 { WOOD } else { [BARK[0] * 1.3, BARK[1] * 1.3, BARK[2] * 1.3] };
+                    shaded(base, x, y, 32)
+                }
+                8 => shaded(LEAVES, x, y, 33),
+                9 => shaded(NEEDLES, x, y, 34),
                 _ => shaded(DIRT, x, y, 13),
             };
             data.extend_from_slice(&px);
