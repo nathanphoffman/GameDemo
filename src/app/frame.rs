@@ -44,9 +44,8 @@ impl App {
             // Rain you hear is snow in the cold; either way it is as loud as the rain is.
             let amount = self.weather.params.rain;
             let snowing = self.weather.snowing;
-            let creepy = matches!(self.weather.biome, Biome::Volcanic | Biome::Swamp);
             let (rain, snow) = if snowing { (0.0, amount) } else { (amount, 0.0) };
-            music.update(rain, snow, if creepy { 1.0 } else { 0.0 }, dt);
+            music.update(rain, snow, self.weather.biome, dt);
         }
 
         // One crack stage, halfway through the mining time.
