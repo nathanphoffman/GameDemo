@@ -1,9 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
-pub const SIZE_X: usize = 160;
-pub const SIZE_Z: usize = 160;
-pub const SIZE_Y: usize = 40;
+pub const SIZE_X: usize = 240;
+pub const SIZE_Z: usize = 240;
+pub const SIZE_Y: usize = 64;
 
 /// Small margin so a box resting exactly on a block boundary isn't treated as inside it.
 pub const EPS: f32 = 1e-4;
@@ -13,6 +13,8 @@ pub enum Block {
     Air,
     Grass,
     Dirt,
+    Snow,
+    Stone,
 }
 
 #[repr(C)]
@@ -54,15 +56,49 @@ fn value_noise(x: f32, z: f32, seed: u32) -> f32 {
 }
 
 /// Layered noise, returns roughly 0..1.
-fn fbm(x: f32, z: f32, seed: u32) -> f32 {
+fn fbm_with(x: f32, z: f32, seed: u32, octaves: u32, persistence: f32, ridged: bool) -> f32 {
     let (mut sum, mut amp, mut freq, mut norm) = (0.0, 1.0, 1.0, 0.0);
-    for octave in 0..3 {
-        sum += value_noise(x * freq, z * freq, seed.wrapping_add(octave)) * amp;
+    for octave in 0..octaves {
+        let mut n = value_noise(x * freq, z * freq, seed.wrapping_add(octave));
+        if ridged {
+            // Sharp crests along the n = 0.5 contour, which form mountain ranges.
+            n = 1.0 - (2.0 * n - 1.0).abs();
+        }
+        sum += n * amp;
         norm += amp;
-        amp *= 0.4;
+        amp *= persistence;
         freq *= 2.0;
     }
     sum / norm
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// 0 = pure grass country, 1 = pure snow country. Snow is on the east side, grass on the
+/// west, with a fairly narrow border in the middle. Noise only wobbles the border a little.
+fn snow_amount(x: usize, z: usize, seed: u32) -> f32 {
+    let (fx, fz) = (x as f32, z as f32);
+    let wobble = (fbm_with(fx / 70.0, fz / 70.0, seed ^ 0xB10E, 3, 0.4, false) - 0.5) * 0.5;
+    // Goes from about -0.25 on the west edge to 1.25 on the east edge.
+    let coldness = 0.5 + wobble + (fx / SIZE_X as f32 - 0.5) * 1.5;
+    ((coldness - 0.25) / 0.5).clamp(0.0, 1.0)
+}
+
+/// Low, long, gentle rolling hills.
+fn hill_height(x: f32, z: f32, seed: u32) -> f32 {
+    let n = fbm_with(x / 75.0, z / 75.0, seed, 2, 0.35, false);
+    let t = ((n - 0.3) / 0.4).clamp(0.0, 1.0);
+    7.0 + t * 7.0
+}
+
+/// Tall ridged ranges with peaks, separated by deep valleys.
+fn mountain_height(x: f32, z: f32, seed: u32) -> f32 {
+    let m = fbm_with(x / 90.0, z / 90.0, seed ^ 0xA11, 3, 0.45, true);
+    let t = ((m - 0.2) / 0.7).clamp(0.0, 1.0);
+    2.0 + 50.0 * t.powf(1.7)
 }
 
 struct Face {
@@ -123,24 +159,45 @@ const FACES: [Face; 6] = [
 ];
 
 impl World {
-    /// Random rolling hills. The same seed always gives the same world.
+    /// Random terrain: gentle hills in the grass zone, tall ranges in the snow zone. The same
+    /// seed always gives the same world.
     pub fn generate(seed: u32) -> World {
         let mut blocks = vec![Block::Air; SIZE_X * SIZE_Y * SIZE_Z];
         let mut heights = vec![0u8; SIZE_X * SIZE_Z];
-        let (min_h, max_h) = (5.0, 26.0);
         for z in 0..SIZE_Z {
             for x in 0..SIZE_X {
-                let n = fbm(x as f32 / 40.0, z as f32 / 40.0, seed);
-                // Noise clusters around 0.5, so stretch it to use the full height range.
-                let t = ((n - 0.25) / 0.5).clamp(0.0, 1.0);
-                let h = (min_h + t * (max_h - min_h)).round() as usize;
+                let snow = snow_amount(x, z, seed);
+                // Terrain shape follows the zone smoothly, so hills grow into mountains.
+                let w = smoothstep(snow);
+                let (fx, fz) = (x as f32, z as f32);
+                let hills = hill_height(fx, fz, seed);
+                let mountains = mountain_height(fx, fz, seed);
+                let h = (hills + (mountains - hills) * w).round() as usize;
+                let h = h.clamp(1, SIZE_Y - 1);
                 heights[z * SIZE_X + x] = h as u8;
+
+                let top = Self::surface_block(x, z, snow, seed);
+                // Snowy country has rock under the snow; grassy country has dirt.
+                let under = if top == Block::Snow { Block::Stone } else { Block::Dirt };
                 for y in 0..h {
-                    blocks[Self::index(x, y, z)] = if y + 1 == h { Block::Grass } else { Block::Dirt };
+                    blocks[Self::index(x, y, z)] = if y + 1 == h { top } else { under };
                 }
             }
         }
         World { blocks, heights }
+    }
+
+    /// Picks grass or snow for a column. The jitter makes the border a speckled mix.
+    fn surface_block(x: usize, z: usize, snow: f32, seed: u32) -> Block {
+        let (fx, fz) = (x as f32, z as f32);
+        let jitter = 0.6 * hash(x as u32, z as u32, seed ^ 0x5EED)
+            + 0.4 * value_noise(fx / 5.0, fz / 5.0, seed ^ 0x5EED)
+            - 0.5;
+        if snow + jitter * 0.5 > 0.5 {
+            Block::Snow
+        } else {
+            Block::Grass
+        }
     }
 
     fn index(x: usize, y: usize, z: usize) -> usize {
@@ -209,6 +266,9 @@ impl World {
                         let layer = match (block, face.kind) {
                             (Block::Grass, 0) => 0.0,
                             (Block::Grass, 1) => 1.0,
+                            (Block::Snow, 0) => 3.0,
+                            (Block::Snow, 1) => 4.0,
+                            (Block::Stone, _) => 5.0,
                             _ => 2.0,
                         };
                         let base = vertices.len() as u32;
@@ -227,5 +287,54 @@ impl World {
             }
         }
         (vertices, indices)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hills_are_low_and_gentle_and_mountains_are_tall() {
+        for seed in [1, 2, 3, 99] {
+            let w = World::generate(seed);
+            let column = |x: usize, z: usize| w.heights[z * SIZE_X + x] as i32;
+            let (mut hill_max, mut mountain_max, mut mountain_min) = (0, 0, i32::MAX);
+            for z in 0..SIZE_Z - 1 {
+                for x in 0..SIZE_X - 1 {
+                    if x < 80 {
+                        hill_max = hill_max.max(column(x, z));
+                        // No cliffs in the hills: every step can be hopped up.
+                        assert!((column(x, z) - column(x + 1, z)).abs() <= 1);
+                        assert!((column(x, z) - column(x, z + 1)).abs() <= 1);
+                    } else if x >= 160 {
+                        mountain_max = mountain_max.max(column(x, z));
+                        mountain_min = mountain_min.min(column(x, z));
+                    }
+                }
+            }
+            assert!(hill_max <= 20, "hills too tall: {hill_max}");
+            assert!(mountain_max >= 35, "mountains too short: {mountain_max}");
+            assert!(mountain_min <= 6, "valleys too shallow: {mountain_min}");
+        }
+    }
+
+    #[test]
+    fn has_grass_snow_and_a_mixed_border() {
+        for seed in [1, 2, 3, 99] {
+            let w = World::generate(seed);
+            let mut snow_per_third = [0; 3];
+            for z in 0..SIZE_Z {
+                for x in 0..SIZE_X {
+                    let top = w.heights[z * SIZE_X + x] as i32 - 1;
+                    if w.get(x as i32, top, z as i32) == Block::Snow {
+                        snow_per_third[x * 3 / SIZE_X] += 1;
+                    }
+                }
+            }
+            assert!(snow_per_third[0] < snow_per_third[2], "{snow_per_third:?}");
+            assert!(snow_per_third[2] > 1000, "{snow_per_third:?}");
+            assert!(snow_per_third[0] < SIZE_X * SIZE_Z / 3 - 1000, "{snow_per_third:?}");
+        }
     }
 }
