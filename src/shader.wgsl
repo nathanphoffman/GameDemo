@@ -70,6 +70,16 @@ fn block_fs(in: BlockOut) -> @location(0) vec4<f32> {
     return vec4(mix(c, HORIZON, fog), 1.0);
 }
 
+// Crack overlay: same vertices as blocks, but transparent where there is no crack.
+@fragment
+fn crack_fs(in: BlockOut) -> @location(0) vec4<f32> {
+    let c = textureSample(blocks, block_sampler, in.uv, in.layer);
+    if (c.a < 0.5) {
+        discard;
+    }
+    return vec4(c.rgb, 1.0);
+}
+
 // ---- HUD (crosshair, counter, mode label) ----
 
 struct HudOut {

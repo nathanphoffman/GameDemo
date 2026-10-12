@@ -1,8 +1,10 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 10; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
-                            // 6 log side, 7 log top, 8 leaves, 9 pine needles
+pub const LAYERS: u32 = 13; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+                            // 6 log side, 7 log top, 8 leaves, 9 pine needles,
+                            // 10 light cracks, 11 heavy cracks (transparent overlays),
+                            // 12 solid near-black (target outline)
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -25,7 +27,47 @@ fn shaded(base: [f32; 3], x: u32, y: u32, seed: u32) -> [u8; 4] {
     ]
 }
 
+/// Transparent tile with dark crack lines grown outward from near the center.
+fn cracks(branches: u32, length: u32, seed: u32) -> Vec<u8> {
+    let size = TILE as i32;
+    let mut on = vec![false; (TILE * TILE) as usize];
+    let mut starts: Vec<(f32, f32)> = vec![(7.5, 7.5)];
+    for b in 0..branches {
+        // Later branches sprout from points already cracked, so it spreads like real cracks.
+        let pick = (hash(b, 1, seed) * starts.len() as f32) as usize;
+        let (mut x, mut y) = starts[pick.min(starts.len() - 1)];
+        let mut angle = hash(b, 2, seed) * std::f32::consts::TAU;
+        for step in 0..length {
+            angle += (hash(b, 10 + step, seed) - 0.5) * 1.2;
+            x += angle.cos();
+            y += angle.sin();
+            let (xi, yi) = (x.round() as i32, y.round() as i32);
+            if xi < 0 || yi < 0 || xi >= size || yi >= size {
+                break;
+            }
+            on[(yi * size + xi) as usize] = true;
+            if step % 3 == 1 {
+                starts.push((x, y));
+            }
+        }
+    }
+    let mut data = Vec::with_capacity((TILE * TILE * 4) as usize);
+    for &lit in &on {
+        data.extend_from_slice(if lit { &[18, 16, 16, 255] } else { &[0, 0, 0, 0] });
+    }
+    data
+}
+
 fn tile(layer: u32) -> Vec<u8> {
+    if layer == 10 {
+        return cracks(4, 7, 70);
+    }
+    if layer == 11 {
+        return cracks(9, 9, 41);
+    }
+    if layer == 12 {
+        return [12, 12, 12, 255].repeat((TILE * TILE) as usize);
+    }
     let mut data = Vec::with_capacity((TILE * TILE * 4) as usize);
     for y in 0..TILE {
         for x in 0..TILE {
@@ -105,4 +147,22 @@ pub fn build() -> Vec<Vec<Vec<u8>>> {
             mips
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cracks_grow_between_stages() {
+        let layers = super::build();
+        let count = |l: usize| layers[l][0].chunks(4).filter(|p| p[3] == 255).count();
+        for l in [10, 11] {
+            for row in layers[l][0].chunks((super::TILE * 4) as usize) {
+                let line: String = row.chunks(4).map(|p| if p[3] == 255 { '#' } else { '.' }).collect();
+                println!("{line}");
+            }
+            println!();
+        }
+        assert!(count(10) >= 8, "light cracks visible: {}", count(10));
+        assert!(count(11) > count(10) * 3 / 2, "heavy {} vs light {}", count(11), count(10));
+    }
 }

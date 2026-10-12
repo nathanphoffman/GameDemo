@@ -12,7 +12,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -45,6 +45,8 @@ struct Keys {
     d: bool,
     sprint: bool,
     jump: bool,
+    /// Left mouse button held.
+    mining: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -111,6 +113,14 @@ struct Gfx {
     sky_pipeline: wgpu::RenderPipeline,
     block_pipeline: wgpu::RenderPipeline,
     hud_pipeline: wgpu::RenderPipeline,
+    crack_pipeline: wgpu::RenderPipeline,
+    crack_vertices: wgpu::Buffer,
+    crack_indices: wgpu::Buffer,
+    crack_visible: bool,
+    outline_vertices: wgpu::Buffer,
+    outline_indices: wgpu::Buffer,
+    outline_index_count: u32,
+    outline_visible: bool,
     mesh_vertices: wgpu::Buffer,
     mesh_indices: wgpu::Buffer,
     mesh_index_count: u32,
@@ -278,12 +288,13 @@ impl Gfx {
             push_constant_ranges: &[],
         });
 
-        // `world_geometry` pipelines test and write depth; the sky and crosshair just draw.
+        // World blocks test and write depth; the crack overlay only tests; sky and HUD just draw.
         let make_pipeline = |layout: &wgpu::PipelineLayout,
                              vs: &str,
                              fs: &str,
                              buffers: &[wgpu::VertexBufferLayout],
-                             world_geometry: bool| {
+                             depth_write: bool,
+                             depth_test: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(vs),
                 layout: Some(layout),
@@ -302,8 +313,8 @@ impl Gfx {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: world_geometry,
-                    depth_compare: if world_geometry {
+                    depth_write_enabled: depth_write,
+                    depth_compare: if depth_test {
                         wgpu::CompareFunction::Less
                     } else {
                         wgpu::CompareFunction::Always
@@ -331,11 +342,19 @@ impl Gfx {
             attributes: &hud_attrs,
         };
 
-        let sky_pipeline = make_pipeline(&layout, "sky_vs", "sky_fs", &[], false);
-        let block_pipeline =
-            make_pipeline(&layout, "block_vs", "block_fs", &[block_layout], true);
+        let sky_pipeline = make_pipeline(&layout, "sky_vs", "sky_fs", &[], false, false);
+        let block_pipeline = make_pipeline(
+            &layout,
+            "block_vs",
+            "block_fs",
+            &[block_layout.clone()],
+            true,
+            true,
+        );
+        let crack_pipeline =
+            make_pipeline(&layout, "block_vs", "crack_fs", &[block_layout], false, true);
         let hud_pipeline =
-            make_pipeline(&empty_layout, "hud_vs", "hud_fs", &[hud_layout], false);
+            make_pipeline(&empty_layout, "hud_vs", "hud_fs", &[hud_layout], false, false);
 
         let mesh_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
@@ -345,6 +364,28 @@ impl Gfx {
         let mesh_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh indices"),
             contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let (overlay_vertices, overlay_indices) = World::block_overlay(0, 0, 0, 10.0);
+        let crack_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("crack vertices"),
+            contents: bytemuck::cast_slice(&overlay_vertices),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let crack_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("crack indices"),
+            contents: bytemuck::cast_slice(&overlay_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let (outline_v, outline_i) = World::block_outline(0, 0, 0, 12.0);
+        let outline_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("outline vertices"),
+            contents: bytemuck::cast_slice(&outline_v),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let outline_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("outline indices"),
+            contents: bytemuck::cast_slice(&outline_i),
             usage: wgpu::BufferUsages::INDEX,
         });
         let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -366,6 +407,14 @@ impl Gfx {
             sky_pipeline,
             block_pipeline,
             hud_pipeline,
+            crack_pipeline,
+            crack_vertices,
+            crack_indices,
+            crack_visible: false,
+            outline_vertices,
+            outline_indices,
+            outline_index_count: outline_i.len() as u32,
+            outline_visible: false,
             mesh_vertices,
             mesh_indices,
             mesh_index_count: indices.len() as u32,
@@ -381,6 +430,27 @@ impl Gfx {
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
         self.depth_view = make_depth_view(&self.device, size.width, size.height);
+    }
+
+    /// Draws a wireframe box around the targeted block, or hides it with None.
+    fn set_outline(&mut self, target: Option<(i32, i32, i32)>) {
+        self.outline_visible = target.is_some();
+        if let Some((x, y, z)) = target {
+            let (vertices, _) = World::block_outline(x, y, z, 12.0);
+            self.queue
+                .write_buffer(&self.outline_vertices, 0, bytemuck::cast_slice(&vertices));
+        }
+    }
+
+    /// Shows crack stage 1 or 2 on a block, or hides the overlay with None.
+    fn set_crack(&mut self, target: Option<((i32, i32, i32), u32)>) {
+        self.crack_visible = target.is_some();
+        if let Some(((x, y, z), stage)) = target {
+            let layer = 9.0 + stage as f32; // texture layers 10 and 11
+            let (vertices, _) = World::block_overlay(x, y, z, layer);
+            self.queue
+                .write_buffer(&self.crack_vertices, 0, bytemuck::cast_slice(&vertices));
+        }
     }
 
     /// Replaces the world mesh, e.g. after a block was mined.
@@ -464,6 +534,20 @@ impl Gfx {
             pass.set_index_buffer(self.mesh_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
 
+            if self.outline_visible {
+                pass.set_pipeline(&self.crack_pipeline);
+                pass.set_vertex_buffer(0, self.outline_vertices.slice(..));
+                pass.set_index_buffer(self.outline_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.outline_index_count, 0, 0..1);
+            }
+
+            if self.crack_visible {
+                pass.set_pipeline(&self.crack_pipeline);
+                pass.set_vertex_buffer(0, self.crack_vertices.slice(..));
+                pass.set_index_buffer(self.crack_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..36, 0, 0..1);
+            }
+
             pass.set_pipeline(&self.hud_pipeline);
             pass.set_vertex_buffer(0, self.hud_buf.slice(..));
             pass.draw(0..hud.len() as u32, 0..1);
@@ -546,6 +630,13 @@ impl ApplicationHandler for App {
                     gfx.resize(size);
                 }
             }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
+            } => {
+                self.keys.mining = state == ElementState::Pressed;
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
@@ -595,15 +686,32 @@ impl ApplicationHandler for App {
                 self.player.update(dt, velocity, self.keys.jump, &self.world);
 
                 // Auto-click: every few seconds, mine whatever the crosshair is on.
-                if self.mode == Mode::Mine {
+                // Progress only builds while the left button is held; letting go starts over.
+                if self.mode == Mode::Mine && self.keys.mining {
                     self.mine_timer += dt;
                     if self.mine_timer >= MINE_INTERVAL {
                         self.mine_timer -= MINE_INTERVAL;
                         self.mine();
                     }
+                } else {
+                    self.mine_timer = 0.0;
                 }
 
+                // Cracks grow with the timer: light after 1 second, heavy after 2.
+                let stage = (self.mine_timer / (MINE_INTERVAL / 3.0)) as u32;
+                let target = if self.mode == Mode::Mine {
+                    self.world
+                        .raycast(self.player.eye(), self.player.forward(), REACH)
+                } else {
+                    None
+                };
+                let crack = target
+                    .filter(|_| stage >= 1)
+                    .map(|block| (block, stage.min(2)));
+
                 if let Some(gfx) = &mut self.gfx {
+                    gfx.set_outline(target);
+                    gfx.set_crack(crack);
                     let hud = hud::build(
                         gfx.config.width,
                         gfx.config.height,

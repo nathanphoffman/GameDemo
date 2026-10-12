@@ -394,6 +394,81 @@ impl World {
         true
     }
 
+    /// The six faces of one block, pushed out a hair so they sit on top of the real faces.
+    pub fn block_overlay(x: i32, y: i32, z: i32, layer: f32) -> ([Vertex; 24], [u32; 36]) {
+        const GROW: f32 = 0.003;
+        let mut vertices = [Vertex {
+            pos: [0.0; 3],
+            uv: [0.0; 2],
+            layer,
+            shade: 1.0,
+        }; 24];
+        let mut indices = [0u32; 36];
+        for (f, face) in FACES.iter().enumerate() {
+            for i in 0..4 {
+                let c = face.corners[i];
+                let at = |offset: i32, c: f32| offset as f32 - GROW + c * (1.0 + 2.0 * GROW);
+                vertices[f * 4 + i].pos = [at(x, c[0]), at(y, c[1]), at(z, c[2])];
+                vertices[f * 4 + i].uv = face.uv[i];
+            }
+            let base = (f * 4) as u32;
+            indices[f * 6..f * 6 + 6]
+                .copy_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (vertices, indices)
+    }
+
+    /// A wireframe box around one block, built from 12 thin bars so it has a visible
+    /// thickness at any distance (GPU lines are always one pixel wide).
+    pub fn block_outline(x: i32, y: i32, z: i32, layer: f32) -> (Vec<Vertex>, Vec<u32>) {
+        const HALF: f32 = 0.012; // half the bar thickness
+        // Corner of the unit cube from a 3-bit index (bit 0 = x, 1 = y, 2 = z).
+        const QUADS: [[u32; 4]; 6] = [
+            [0, 2, 6, 4],
+            [1, 3, 7, 5],
+            [0, 1, 5, 4],
+            [2, 3, 7, 6],
+            [0, 1, 3, 2],
+            [4, 5, 7, 6],
+        ];
+        let origin = [x as f32, y as f32, z as f32];
+        let mut vertices = Vec::with_capacity(96);
+        let mut indices = Vec::with_capacity(432);
+        for axis in 0..3 {
+            for corner in 0..4 {
+                // Which two of the other axes this bar sits on (each at 0 or 1).
+                let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+                let mut min = [0.0f32; 3];
+                let mut max = [0.0f32; 3];
+                min[axis] = -HALF;
+                max[axis] = 1.0 + HALF;
+                for (k, bit) in [(a, corner & 1), (b, corner >> 1)] {
+                    min[k] = bit as f32 - HALF;
+                    max[k] = bit as f32 + HALF;
+                }
+                let base = vertices.len() as u32;
+                for i in 0..8u32 {
+                    let pick = |k: usize, bit: u32| if bit == 1 { max[k] } else { min[k] };
+                    vertices.push(Vertex {
+                        pos: [
+                            origin[0] + pick(0, i & 1),
+                            origin[1] + pick(1, (i >> 1) & 1),
+                            origin[2] + pick(2, (i >> 2) & 1),
+                        ],
+                        uv: [0.0, 0.0],
+                        layer,
+                        shade: 1.0,
+                    });
+                }
+                for q in QUADS {
+                    let [p, r, s, t] = q.map(|i| base + i);
+                    indices.extend_from_slice(&[p, r, s, p, s, t]);
+                }
+            }
+        }
+        (vertices, indices)
+    }
+
     /// Feet position standing on the surface in the middle of the world.
     pub fn spawn_point(&self) -> Vec3 {
         let (x, z) = (SIZE_X / 2, SIZE_Z / 2);
@@ -558,5 +633,18 @@ mod tests {
         assert!(w.raycast(s + Vec3::new(0.0, 1.62, 0.0), Vec3::Y, 5.0).is_none());
         // The bottom layer can't be mined.
         assert!(!w.remove_block(10, 0, 10));
+    }
+
+    #[test]
+    fn outline_has_twelve_bars_around_the_block() {
+        let (v, i) = World::block_outline(3, 4, 5, 12.0);
+        assert_eq!(v.len(), 12 * 8);
+        assert_eq!(i.len(), 12 * 36);
+        assert!(i.iter().all(|&n| (n as usize) < v.len()));
+        for vert in &v {
+            for (p, o) in vert.pos.iter().zip([3.0, 4.0, 5.0]) {
+                assert!(*p >= o - 0.02 && *p <= o + 1.02);
+            }
+        }
     }
 }

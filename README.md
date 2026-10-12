@@ -24,12 +24,13 @@ cargo run --release -- 42
 | Mouse | Look |
 | Space | Jump |
 | Left Shift | Sprint |
+| Left click (hold) | Mine the targeted block |
 | Scroll wheel | Switch mode: mine / attack / off |
 | Esc | Quit |
 
 ## Mining
 
-Every 3 seconds the game auto-clicks. In mine mode, that removes the block under the crosshair (within 5 blocks) and adds 1 to the rock counter in the upper left. Attack and off modes do nothing yet.
+Hold the left mouse button in mine mode. Every 3 seconds of holding removes the block under the crosshair (within 5 blocks) and adds 1 to the rock counter in the upper left. Letting go resets the progress. Attack and off modes do nothing yet.
 
 ## Layout
 
