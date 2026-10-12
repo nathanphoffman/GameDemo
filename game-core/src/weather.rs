@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::biome::Biome;
 
 /// Seconds of gameplay between weather checks.
@@ -12,7 +14,7 @@ const BLEND_SECONDS: f32 = 4.0;
 /// when it is windy.
 const BASE_DRIFT: [f32; 2] = [0.018, 0.007];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Kind {
     Sunny,
     Fog,

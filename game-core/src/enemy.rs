@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use crate::biome::Biome;
 use crate::player::Player;
@@ -16,7 +17,7 @@ const GIVE_UP_DISTANCE: f32 = 20.0;
 /// Close enough to home to count as arrived.
 const HOME_ARRIVAL: f32 = 0.4;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Kind {
     /// Plains. Peaceful until attacked, then hostile.
     Deer,
@@ -176,6 +177,11 @@ impl Enemy {
     pub fn provoke(&mut self) {
         self.hostile = true;
         self.behavior = Behavior::Chase;
+    }
+
+    /// Where it is walking back to, if it has given up and is on its way home.
+    pub fn returning_home(&self) -> Option<Vec3> {
+        (self.behavior == Behavior::Return).then_some(self.home)
     }
 
     /// What the body should face: the player, except while walking home.

@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::world::Block;
 
 /// Seconds between conversion attempts.
@@ -7,7 +9,7 @@ pub const CONVERT_COST: u32 = 4;
 
 /// What the player has collected. The five kinds are in HUD row order: grey, white, green,
 /// brown, black.
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resources {
     pub grey: u32,
     pub white: u32,

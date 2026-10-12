@@ -5,9 +5,13 @@
 
 mod blocks;
 mod fight;
+mod snapshot;
 mod update;
 
+pub use snapshot::{EnemyView, PlayerView, Snapshot, YouView};
+
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use crate::biome::Biome;
 use crate::combat::{Candidate, Combat, Side};
@@ -34,12 +38,14 @@ pub const FORGE_RANGE: f32 = 6.0;
 pub const FURNACE_RANGE: f32 = 10.0;
 /// After a round ends, the next one can't start for this long.
 pub const ROUND_PAUSE: f32 = 2.0;
+/// How many kinds of dense resource there are.
+const DENSE_KINDS: usize = 5;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct PlayerId(pub u32);
 
 /// What a player is holding down and where they are looking. Sent whole whenever it changes.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct PlayerInput {
     pub forward: bool,
     pub back: bool,
@@ -90,7 +96,7 @@ impl PlayerState {
 }
 
 /// Things a player can do.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Command {
     /// Keys held and look direction.
     SetInput(PlayerInput),
@@ -108,7 +114,7 @@ pub enum Command {
 }
 
 /// Things that happened that a screen or speaker may want to show.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Event {
     /// A player mined a block (`ice` if it was ice).
     Dug { player: PlayerId, block: Block, ice: bool },
@@ -117,6 +123,7 @@ pub enum Event {
 }
 
 pub struct Game {
+    seed: u32,
     pub world: World,
     pub enemies: Vec<Enemy>,
     pub weather: Weather,
@@ -138,6 +145,7 @@ impl Game {
         let (cx, cz) = (world::SIZE_X as i32 / 2, world::SIZE_Z as i32 / 2);
         let enemies = vec![Enemy::new(1, Kind::Deer, world.open_spot(cx - 9, cz - 3))];
         Game {
+            seed,
             world,
             enemies,
             weather: Weather::new(seed ^ 0x5EA7),
@@ -150,6 +158,11 @@ impl Game {
             next_player_id: 1,
             events: Vec::new(),
         }
+    }
+
+    /// The seed the world was generated from.
+    pub fn seed(&self) -> u32 {
+        self.seed
     }
 
     /// A new player, standing at the world's spawn point.
@@ -187,7 +200,13 @@ impl Game {
             return;
         };
         match command {
-            Command::SetInput(input) => {
+            Command::SetInput(mut input) => {
+                // Commands can come off a network, so don't let a bad number into the game.
+                if !input.yaw.is_finite() || !input.pitch.is_finite() {
+                    return;
+                }
+                let limit = 89.0_f32.to_radians();
+                input.pitch = input.pitch.clamp(-limit, limit);
                 let player = &mut self.players[p];
                 player.input = input;
                 player.body.yaw = input.yaw;
@@ -196,12 +215,17 @@ impl Game {
             Command::Attack => self.attack(p),
             Command::PlaceBlock => self.place_block(p),
             Command::ApplyToTarget { kind } => {
+                if kind >= DENSE_KINDS {
+                    return;
+                }
                 if let Some(pos) = self.block_in_sights_of(p) {
                     self.apply_dense(p, kind, pos);
                 }
             }
             Command::ApplyAt { kind, pos } => {
-                self.apply_dense(p, kind, pos);
+                if kind < DENSE_KINDS && World::in_bounds(pos.0, pos.1, pos.2) {
+                    self.apply_dense(p, kind, pos);
+                }
             }
             Command::ToggleConversion(row) => self.players[p].converter.toggle(row),
         }
@@ -230,6 +254,9 @@ impl Game {
         let Some(p) = self.index(id) else {
             return false;
         };
+        if kind >= DENSE_KINDS {
+            return false;
+        }
         self.effect_at_of(p, kind, pos)
             .is_some_and(|e| self.players[p].resources.dense[kind] >= e.dense_cost())
     }

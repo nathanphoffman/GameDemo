@@ -1,5 +1,8 @@
 use crate::biome::{self, Biome};
+use std::collections::HashMap;
+
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 pub const SIZE_X: usize = 1024;
 pub const SIZE_Z: usize = 1024;
@@ -16,7 +19,7 @@ pub const WATER_LEVEL: usize = 6;
 /// Small margin so a box resting exactly on a block boundary isn't treated as inside it.
 pub const EPS: f32 = 1e-4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Block {
     Air,
     Grass,
@@ -90,6 +93,13 @@ pub struct RayHit {
     pub place: Option<(i32, i32, i32)>,
 }
 
+/// One cell of the world changing to a block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockChange {
+    pub pos: (i32, i32, i32),
+    pub block: Block,
+}
+
 pub struct World {
     blocks: Vec<Block>,
     heights: Vec<u8>,
@@ -102,6 +112,11 @@ pub struct World {
     /// Per column: water here belongs to a pond, lake or river that is entirely in the snow
     /// biome, so it is drawn as ice.
     frozen: Vec<bool>,
+    /// Every cell that is different from what `generate` made, with what it is now. Anyone
+    /// with the seed and this can rebuild the world.
+    edits: HashMap<(i32, i32, i32), Block>,
+    /// The changes since `take_changes` was last called, oldest first.
+    fresh: Vec<BlockChange>,
 }
 
 pub fn hash(x: u32, y: u32, seed: u32) -> f32 {
@@ -295,9 +310,14 @@ impl World {
             biomes,
             dirty: vec![false; CHUNKS_X * CHUNKS_Z],
             frozen,
+            edits: HashMap::new(),
+            fresh: Vec::new(),
         };
         world.plant_trees(seed);
         world.dirty.fill(false);
+        // The trees are part of the generated world, not edits to it.
+        world.edits.clear();
+        world.fresh.clear();
         world
     }
 
@@ -453,6 +473,7 @@ impl World {
             self.blocks[i] = block;
             self.top_y = self.top_y.max(y as usize + 1);
             self.mark_dirty(x, z);
+            self.record(x, y, z, block);
         }
     }
 
@@ -800,6 +821,7 @@ impl World {
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
         self.top_y = self.top_y.max(y as usize + 1);
         self.mark_dirty(x, z);
+        self.record(x, y, z, block);
         true
     }
 
@@ -810,6 +832,7 @@ impl World {
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
         self.mark_dirty(x, z);
+        self.record(x, y, z, block);
         true
     }
 
@@ -822,12 +845,52 @@ impl World {
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = Block::Air;
         self.mark_dirty(x, z);
+        self.record(x, y, z, Block::Air);
         self.flow_into(x, y, z);
         Some(block)
     }
 
     fn set_cell(&mut self, x: i32, y: i32, z: i32, block: Block) {
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
+        self.mark_dirty(x, z);
+        self.record(x, y, z, block);
+    }
+
+    /// Notes that a cell was changed, for `all_edits` and `take_changes`.
+    fn record(&mut self, x: i32, y: i32, z: i32, block: Block) {
+        self.edits.insert((x, y, z), block);
+        self.fresh.push(BlockChange { pos: (x, y, z), block });
+    }
+
+    pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
+        x >= 0 && y >= 0 && z >= 0 && x < SIZE_X as i32 && y < SIZE_Y as i32 && z < SIZE_Z as i32
+    }
+
+    /// Every change made since the world was generated (only the latest for each cell). With
+    /// the seed, this rebuilds the world as it is now.
+    pub fn all_edits(&self) -> Vec<BlockChange> {
+        self.edits
+            .iter()
+            .map(|(&pos, &block)| BlockChange { pos, block })
+            .collect()
+    }
+
+    /// The changes since the last call, in the order they happened.
+    pub fn take_changes(&mut self) -> Vec<BlockChange> {
+        std::mem::take(&mut self.fresh)
+    }
+
+    /// Makes a change that happened somewhere else (on the host) true here, with no rules
+    /// applied: the cell just becomes `block`. Out of range changes are ignored.
+    pub fn apply_change(&mut self, change: BlockChange) {
+        let (x, y, z) = change.pos;
+        if !Self::in_bounds(x, y, z) {
+            return;
+        }
+        self.blocks[Self::index(x as usize, y as usize, z as usize)] = change.block;
+        if change.block != Block::Air {
+            self.top_y = self.top_y.max(y as usize + 1);
+        }
         self.mark_dirty(x, z);
     }
 
