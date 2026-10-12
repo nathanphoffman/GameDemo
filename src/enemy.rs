@@ -25,6 +25,13 @@ const BAR_LAYER_GAP: f32 = 0.01;
 
 /// Chasers stop this far from the player (horizontally).
 const STOP_DISTANCE: f32 = 1.8;
+/// A hostile creature notices the player, and starts chasing, inside this distance...
+const AGGRO_RANGE: f32 = 12.0;
+/// ...and gives up and heads home once the player is farther than this. Being larger than the
+/// range above stops it from flickering between the two at the boundary.
+const GIVE_UP_DISTANCE: f32 = 20.0;
+/// Close enough to home to count as arrived.
+const HOME_ARRIVAL: f32 = 0.4;
 
 /// How many enemies can be drawn at once, and the most vertices one of them can need.
 pub const MAX_ENEMIES: usize = 8;
@@ -47,11 +54,11 @@ impl Kind {
         }
     }
 
-    /// Blocks per second when chasing. Both are slower than the player's walk.
+    /// Blocks per second when chasing or walking home. Well under the player's walk (5).
     fn chase_speed(self) -> f32 {
         match self {
-            Kind::Skeleton => 3.0,
-            Kind::Deer => 4.0,
+            Kind::Skeleton => 2.0,
+            Kind::Deer => 3.0,
         }
     }
 
@@ -72,6 +79,17 @@ impl Kind {
     }
 }
 
+/// What an enemy is doing with itself right now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Behavior {
+    /// Standing at home.
+    Idle,
+    /// Going after the player.
+    Chase,
+    /// Gave up; walking back home.
+    Return,
+}
+
 pub struct Enemy {
     pub id: u32,
     pub kind: Kind,
@@ -80,6 +98,9 @@ pub struct Enemy {
     pub health: i32,
     /// Hostile enemies chase the player and attack when close. Passive ones just stand.
     pub hostile: bool,
+    /// Where it was placed; it goes back here after giving up.
+    home: Vec3,
+    pub behavior: Behavior,
     /// Set when walking but not getting anywhere, so he hops over one-block steps.
     jump_next: bool,
 }
@@ -158,6 +179,8 @@ impl Enemy {
             body: Player::new(pos),
             health: kind.max_health(),
             hostile: kind.starts_hostile(),
+            home: pos,
+            behavior: Behavior::Idle,
             jump_next: false,
         }
     }
@@ -167,16 +190,77 @@ impl Enemy {
         self.body.pos
     }
 
-    /// Walks toward `target` if `chase`, stopping at arm's length.
-    pub fn step(&mut self, dt: f32, target: Vec3, chase: bool, world: &World) {
+    /// Makes the enemy hostile and sends it after the player (a click on a passive animal).
+    pub fn provoke(&mut self) {
+        self.hostile = true;
+        self.behavior = Behavior::Chase;
+    }
+
+    /// What the body should face: the player, except while walking home.
+    pub fn facing(&self, player: Vec3) -> Vec3 {
+        if self.behavior == Behavior::Return {
+            self.home
+        } else {
+            player
+        }
+    }
+
+    /// One frame of behavior and movement.
+    ///
+    /// Hostile creatures start chasing when the player is within `AGGRO_RANGE` and give up
+    /// past `GIVE_UP_DISTANCE`, then walk back home. A passive creature that had been
+    /// provoked also calms down when it gives up.
+    pub fn update(&mut self, dt: f32, player: Vec3, player_alive: bool, world: &World) {
+        let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
+        let distance = flat(player, self.body.pos);
+        let wants_fight = self.hostile && player_alive && distance <= AGGRO_RANGE;
+
+        match self.behavior {
+            Behavior::Idle => {
+                if wants_fight {
+                    self.behavior = Behavior::Chase;
+                }
+            }
+            Behavior::Chase => {
+                if !self.hostile || !player_alive || distance > GIVE_UP_DISTANCE {
+                    self.behavior = Behavior::Return;
+                    if !self.kind.starts_hostile() {
+                        self.hostile = false;
+                    }
+                }
+            }
+            Behavior::Return => {
+                if wants_fight {
+                    self.behavior = Behavior::Chase;
+                } else if flat(self.home, self.body.pos) <= HOME_ARRIVAL {
+                    self.behavior = Behavior::Idle;
+                }
+            }
+        }
+
+        let goal = match self.behavior {
+            Behavior::Idle => None,
+            Behavior::Chase => Some((player, STOP_DISTANCE)),
+            Behavior::Return => Some((self.home, HOME_ARRIVAL)),
+        };
+        self.walk(dt, goal, world);
+    }
+
+    /// Walks toward `goal` (a point and how close to stop), or just stands and falls.
+    fn walk(&mut self, dt: f32, goal: Option<(Vec3, f32)>, world: &World) {
         let speed = self.kind.chase_speed();
         let pos = self.body.pos;
-        let flat = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z);
-        let distance = flat.length();
-        let want = if chase && distance > STOP_DISTANCE {
-            flat / distance * speed
-        } else {
-            Vec3::ZERO
+        let want = match goal {
+            Some((target, stop)) => {
+                let flat = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z);
+                let distance = flat.length();
+                if distance > stop {
+                    flat / distance * speed
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            None => Vec3::ZERO,
         };
         let jump = self.jump_next && want != Vec3::ZERO;
         self.body.update(dt, want, jump, world);
@@ -395,38 +479,86 @@ mod tests {
         }
     }
 
-    #[test]
-    fn chasers_walk_up_and_stop_at_arm_s_length() {
-        let world = World::generate(4);
-        for kind in [Kind::Skeleton, Kind::Deer] {
-            let mut e = Enemy::new(1, kind, world.open_spot(120, 113));
-            // Let him land first.
-            for _ in 0..60 {
-                e.step(1.0 / 60.0, e.pos(), false, &world);
-            }
-            let target = e.pos() + Vec3::new(0.0, 0.0, -4.0);
-            let start = e.pos();
-            for _ in 0..60 * 4 {
-                e.step(1.0 / 60.0, target, true, &world);
-            }
-            let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
-            assert!(flat(e.pos(), start) > 1.5, "{kind:?} moved toward the target");
-            let gap = flat(e.pos(), target);
-            assert!((gap - STOP_DISTANCE).abs() < 0.5, "{kind:?} stopped at {gap}");
+    /// Runs `seconds` of game time with the player standing at `player`.
+    fn run(e: &mut Enemy, world: &World, player: Vec3, seconds: f32) {
+        for _ in 0..(seconds * 60.0) as u32 {
+            e.update(1.0 / 60.0, player, true, world);
         }
+    }
+
+    fn flat(a: Vec3, b: Vec3) -> f32 {
+        Vec3::new(a.x - b.x, 0.0, a.z - b.z).length()
+    }
+
+    #[test]
+    fn hostile_chases_gives_up_returns_home_and_notices_again() {
+        let world = World::generate(4);
+        let mut e = Enemy::new(1, Kind::Skeleton, world.open_spot(120, 113));
+        let home = e.pos();
+        run(&mut e, &world, home + Vec3::new(0.0, 0.0, 60.0), 1.0); // settle; player far away
+        assert_eq!(e.behavior, Behavior::Idle, "too far to notice");
+        let settled = e.pos();
+
+        // The player appears nearby: he comes over (a tree or step can still slow him down).
+        let near = settled + Vec3::new(0.0, 0.0, -8.0);
+        run(&mut e, &world, near, 0.5);
+        assert_eq!(e.behavior, Behavior::Chase);
+        run(&mut e, &world, near, 6.0);
+        assert!(flat(e.pos(), near) < 8.0 - 4.0, "closed in: {}", flat(e.pos(), near));
+
+        // The player runs far away: he gives up and walks back to where he started.
+        let far = e.pos() + Vec3::new(0.0, 0.0, -(GIVE_UP_DISTANCE + 5.0));
+        run(&mut e, &world, far, 0.2);
+        assert_eq!(e.behavior, Behavior::Return);
+        assert!(e.hostile, "a skeleton stays hostile");
+        run(&mut e, &world, far, 12.0);
+        assert!(flat(e.pos(), settled) < 1.0, "back home: {}", flat(e.pos(), settled));
+        assert_eq!(e.behavior, Behavior::Idle);
+
+        // And he notices the player again.
+        run(&mut e, &world, near, 0.5);
+        assert_eq!(e.behavior, Behavior::Chase);
+    }
+
+    #[test]
+    fn provoked_deer_calms_down_and_goes_home() {
+        let world = World::generate(4);
+        let mut e = Enemy::new(2, Kind::Deer, world.open_spot(112, 117));
+        let spot = e.pos();
+        run(&mut e, &world, spot + Vec3::new(0.0, 0.0, 60.0), 1.0); // settle
+        let home = e.pos();
+        run(&mut e, &world, home + Vec3::new(0.0, 0.0, -30.0), 0.5);
+        assert_eq!(e.behavior, Behavior::Idle, "passive deer ignore the player");
+        assert!(!e.hostile);
+
+        let player = home + Vec3::new(0.0, 0.0, -3.0);
+        e.provoke();
+        assert!(e.hostile);
+        run(&mut e, &world, player, 1.0);
+        assert_eq!(e.behavior, Behavior::Chase);
+
+        let far = e.pos() + Vec3::new(0.0, 0.0, -(GIVE_UP_DISTANCE + 5.0));
+        run(&mut e, &world, far, 0.2);
+        assert_eq!(e.behavior, Behavior::Return);
+        assert!(!e.hostile, "passive again");
+        run(&mut e, &world, far, 15.0);
+        assert!(flat(e.pos(), home) < 1.0, "home: {}", flat(e.pos(), home));
+        assert_eq!(e.behavior, Behavior::Idle);
+
+        // Standing next to a calm deer doesn't start anything.
+        run(&mut e, &world, home + Vec3::new(0.0, 0.0, -3.0), 3.0);
+        assert_eq!(e.behavior, Behavior::Idle);
+        assert!(flat(e.pos(), home) < 0.5);
     }
 
     #[test]
     fn passive_enemies_stay_put() {
         let world = World::generate(4);
         let mut e = Enemy::new(1, Kind::Deer, world.open_spot(112, 117));
-        for _ in 0..60 {
-            e.step(1.0 / 60.0, e.pos(), false, &world);
-        }
+        let spot = e.pos();
+        run(&mut e, &world, spot, 1.0);
         let start = e.pos();
-        for _ in 0..120 {
-            e.step(1.0 / 60.0, start + Vec3::new(0.0, 0.0, -6.0), false, &world);
-        }
+        run(&mut e, &world, start + Vec3::new(0.0, 0.0, -6.0), 2.0);
         assert!((e.pos() - start).length() < 0.01);
     }
 }

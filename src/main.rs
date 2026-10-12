@@ -659,7 +659,7 @@ impl App {
         self.hp_shown = self.combat.player_hp as f32;
         self.sync_enemies();
         if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == sight.id) {
-            enemy.hostile = true;
+            enemy.provoke();
             self.engaged = Some(enemy.id);
             self.combat
                 .begin(Side::Player, enemy.health, &mut self.dice);
@@ -682,8 +682,7 @@ impl App {
         let player_alive = self.combat.player_hp > 0;
         let target = self.player.pos;
         for enemy in &mut self.enemies {
-            let chase = enemy.hostile && player_alive;
-            enemy.step(dt, target, chase, &self.world);
+            enemy.update(dt, target, player_alive, &self.world);
         }
 
         self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
@@ -853,7 +852,7 @@ impl ApplicationHandler for App {
                 let enemy_mesh: Vec<Vertex> = self
                     .enemies
                     .iter()
-                    .flat_map(|e| e.mesh(look_at))
+                    .flat_map(|e| e.mesh(e.facing(look_at)))
                     .collect();
 
                 if let Some(gfx) = &mut self.gfx {
