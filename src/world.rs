@@ -104,19 +104,20 @@ fn mountain_height(x: f32, z: f32, seed: u32) -> f32 {
     3.0 + 38.0 * t.powf(1.5)
 }
 
-struct Face {
-    normal: [i32; 3],
-    corners: [[f32; 3]; 4],
-    uv: [[f32; 2]; 4],
-    shade: f32,
+pub(crate) struct Face {
+    pub(crate) normal: [i32; 3],
+    pub(crate) corners: [[f32; 3]; 4],
+    pub(crate) uv: [[f32; 2]; 4],
+    pub(crate) shade: f32,
     /// 0 = top, 1 = side, 2 = bottom
-    kind: u8,
+    pub(crate) kind: u8,
 }
 
 const SIDE_UV: [[f32; 2]; 4] = [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
 const FLAT_UV: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
 
-const FACES: [Face; 6] = [
+/// +Y, -Y, +X, -X, +Z, -Z
+pub(crate) const FACES: [Face; 6] = [
     Face {
         normal: [0, 1, 0],
         corners: [[0., 1., 0.], [0., 1., 1.], [1., 1., 1.], [1., 1., 0.]],
@@ -421,6 +422,12 @@ impl World {
     /// A wireframe box around one block, built from 12 thin bars so it has a visible
     /// thickness at any distance (GPU lines are always one pixel wide).
     pub fn block_outline(x: i32, y: i32, z: i32, layer: f32) -> (Vec<Vertex>, Vec<u32>) {
+        let min = Vec3::new(x as f32, y as f32, z as f32);
+        Self::box_outline(min, min + Vec3::ONE, layer)
+    }
+
+    /// Same wireframe, around any axis-aligned box.
+    pub fn box_outline(min_corner: Vec3, max_corner: Vec3, layer: f32) -> (Vec<Vertex>, Vec<u32>) {
         const HALF: f32 = 0.012; // half the bar thickness
         // Corner of the unit cube from a 3-bit index (bit 0 = x, 1 = y, 2 = z).
         const QUADS: [[u32; 4]; 6] = [
@@ -431,7 +438,7 @@ impl World {
             [0, 1, 3, 2],
             [4, 5, 7, 6],
         ];
-        let origin = [x as f32, y as f32, z as f32];
+        let (lo, hi) = (min_corner.to_array(), max_corner.to_array());
         let mut vertices = Vec::with_capacity(96);
         let mut indices = Vec::with_capacity(432);
         for axis in 0..3 {
@@ -440,20 +447,21 @@ impl World {
                 let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
                 let mut min = [0.0f32; 3];
                 let mut max = [0.0f32; 3];
-                min[axis] = -HALF;
-                max[axis] = 1.0 + HALF;
+                min[axis] = lo[axis] - HALF;
+                max[axis] = hi[axis] + HALF;
                 for (k, bit) in [(a, corner & 1), (b, corner >> 1)] {
-                    min[k] = bit as f32 - HALF;
-                    max[k] = bit as f32 + HALF;
+                    let edge = if bit == 1 { hi[k] } else { lo[k] };
+                    min[k] = edge - HALF;
+                    max[k] = edge + HALF;
                 }
                 let base = vertices.len() as u32;
                 for i in 0..8u32 {
                     let pick = |k: usize, bit: u32| if bit == 1 { max[k] } else { min[k] };
                     vertices.push(Vertex {
                         pos: [
-                            origin[0] + pick(0, i & 1),
-                            origin[1] + pick(1, (i >> 1) & 1),
-                            origin[2] + pick(2, (i >> 2) & 1),
+                            pick(0, i & 1),
+                            pick(1, (i >> 1) & 1),
+                            pick(2, (i >> 2) & 1),
                         ],
                         uv: [0.0, 0.0],
                         layer,
@@ -467,6 +475,30 @@ impl World {
             }
         }
         (vertices, indices)
+    }
+
+    /// A flat, open spot ahead of the spawn point (the player starts facing -Z) with room for
+    /// a 3x3x3 skeleton. Returns the bottom center.
+    pub fn enemy_spot(&self) -> Vec3 {
+        let (cx, cz) = ((SIZE_X / 2) as i32, (SIZE_Z / 2) as i32);
+        for dist in 7..60 {
+            for dx in [0, 3, -3, 6, -6] {
+                let (x, z) = (cx + dx, cz - dist);
+                if x < 2 || z < 2 || x + 2 >= SIZE_X as i32 || z + 2 >= SIZE_Z as i32 {
+                    continue;
+                }
+                let ground = self.heights[z as usize * SIZE_X + x as usize] as i32;
+                let clear = (0..3).all(|dy| {
+                    (-1..=1).all(|ox| {
+                        (-1..=1).all(|oz| self.get(x + ox, ground + dy, z + oz) == Block::Air)
+                    })
+                });
+                if clear {
+                    return Vec3::new(x as f32 + 0.5, ground as f32, z as f32 + 0.5);
+                }
+            }
+        }
+        self.spawn_point() + Vec3::new(0.0, 0.0, -7.0)
     }
 
     /// Feet position standing on the surface in the middle of the world.
@@ -644,6 +676,19 @@ mod tests {
         for vert in &v {
             for (p, o) in vert.pos.iter().zip([3.0, 4.0, 5.0]) {
                 assert!(*p >= o - 0.02 && *p <= o + 1.02);
+            }
+        }
+    }
+
+    #[test]
+    fn enemy_spot_is_open_and_on_the_ground() {
+        for seed in [1, 2, 3, 99] {
+            let w = World::generate(seed);
+            let p = w.enemy_spot();
+            let (x, y, z) = (p.x.floor() as i32, p.y as i32, p.z.floor() as i32);
+            assert_ne!(w.get(x, y - 1, z), Block::Air, "standing on something");
+            for dy in 0..3 {
+                assert_eq!(w.get(x, y + dy, z), Block::Air);
             }
         }
     }

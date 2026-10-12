@@ -25,7 +25,11 @@ fn glyph(c: char) -> [u8; 5] {
         '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
         'A' => [0b010, 0b101, 0b111, 0b101, 0b101],
         'C' => [0b011, 0b100, 0b100, 0b100, 0b011],
+        'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
         'E' => [0b111, 0b100, 0b110, 0b100, 0b111],
+        ':' => [0b000, 0b010, 0b000, 0b010, 0b000],
+        '+' => [0b000, 0b010, 0b111, 0b010, 0b000],
+        '=' => [0b000, 0b111, 0b000, 0b111, 0b000],
         'F' => [0b111, 0b100, 0b110, 0b100, 0b100],
         'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
         'K' => [0b101, 0b101, 0b110, 0b101, 0b101],
@@ -89,6 +93,7 @@ pub fn build(
     rocks: u32,
     mode_label: &str,
     mode_color: [f32; 3],
+    roll_text: Option<&str>,
 ) -> Vec<HudVertex> {
     let (w, h) = (width as f32, height as f32);
     let mut b = Builder {
@@ -119,6 +124,9 @@ pub fn build(
     );
     b.text(margin + 8.0 * scale, margin + 0.5 * scale, scale, &rocks.to_string(), white);
     b.text(margin, margin + 8.0 * scale, scale, mode_label, mode_color);
+    if let Some(roll) = roll_text {
+        b.text(margin, margin + 16.0 * scale, scale, roll, [1.0, 0.88, 0.3]);
+    }
 
     b.verts
 }

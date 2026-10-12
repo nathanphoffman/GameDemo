@@ -1,3 +1,4 @@
+mod enemy;
 mod hud;
 mod music;
 mod player;
@@ -18,6 +19,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use hud::{HudVertex, MAX_HUD_VERTICES};
+use enemy::{Dice, Enemy};
 use player::Player;
 use world::{Vertex, World};
 
@@ -27,6 +29,8 @@ const MOUSE_SENSITIVITY: f32 = 0.0022;
 const FOV_Y_DEGREES: f32 = 80.0;
 const MINE_INTERVAL: f32 = 3.0; // seconds between automatic clicks
 const REACH: f32 = 5.0; // blocks
+const ATTACK_INTERVAL: f32 = 1.0; // seconds between hits while holding the button
+const ROLL_DISPLAY_SECONDS: f32 = 2.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
@@ -121,6 +125,12 @@ struct Gfx {
     outline_indices: wgpu::Buffer,
     outline_index_count: u32,
     outline_visible: bool,
+    enemy_vertices: wgpu::Buffer,
+    enemy_crack_vertices: wgpu::Buffer,
+    enemy_indices: wgpu::Buffer,
+    enemy_index_count: u32,
+    enemy_visible: bool,
+    enemy_cracked: bool,
     mesh_vertices: wgpu::Buffer,
     mesh_indices: wgpu::Buffer,
     mesh_index_count: u32,
@@ -388,6 +398,23 @@ impl Gfx {
             contents: bytemuck::cast_slice(&outline_i),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let enemy_buffer_size = (enemy::VERTEX_COUNT * std::mem::size_of::<Vertex>()) as u64;
+        let make_enemy_buffer = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: enemy_buffer_size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let enemy_vertices = make_enemy_buffer("enemy vertices");
+        let enemy_crack_vertices = make_enemy_buffer("enemy cracks");
+        let enemy_index_list = enemy::indices();
+        let enemy_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("enemy indices"),
+            contents: bytemuck::cast_slice(&enemy_index_list),
+            usage: wgpu::BufferUsages::INDEX,
+        });
         let hud_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hud"),
             size: (MAX_HUD_VERTICES * std::mem::size_of::<HudVertex>()) as u64,
@@ -415,6 +442,12 @@ impl Gfx {
             outline_indices,
             outline_index_count: outline_i.len() as u32,
             outline_visible: false,
+            enemy_vertices,
+            enemy_crack_vertices,
+            enemy_indices,
+            enemy_index_count: enemy_index_list.len() as u32,
+            enemy_visible: false,
+            enemy_cracked: false,
             mesh_vertices,
             mesh_indices,
             mesh_index_count: indices.len() as u32,
@@ -432,13 +465,28 @@ impl Gfx {
         self.depth_view = make_depth_view(&self.device, size.width, size.height);
     }
 
-    /// Draws a wireframe box around the targeted block, or hides it with None.
-    fn set_outline(&mut self, target: Option<(i32, i32, i32)>) {
+    /// Draws a wireframe around the targeted box (a block or the enemy), or hides it.
+    fn set_outline(&mut self, target: Option<(Vec3, Vec3)>) {
         self.outline_visible = target.is_some();
-        if let Some((x, y, z)) = target {
-            let (vertices, _) = World::block_outline(x, y, z, 12.0);
+        if let Some((min, max)) = target {
+            let (vertices, _) = World::box_outline(min, max, 12.0);
             self.queue
                 .write_buffer(&self.outline_vertices, 0, bytemuck::cast_slice(&vertices));
+        }
+    }
+
+    /// Uploads the enemy's body (and its crack overlay, if any), or hides him with None.
+    fn set_enemy(&mut self, mesh: Option<(Vec<Vertex>, Option<Vec<Vertex>>)>) {
+        self.enemy_visible = mesh.is_some();
+        self.enemy_cracked = false;
+        if let Some((body, cracks)) = mesh {
+            self.queue
+                .write_buffer(&self.enemy_vertices, 0, bytemuck::cast_slice(&body));
+            if let Some(cracks) = cracks {
+                self.queue
+                    .write_buffer(&self.enemy_crack_vertices, 0, bytemuck::cast_slice(&cracks));
+                self.enemy_cracked = true;
+            }
         }
     }
 
@@ -534,6 +582,18 @@ impl Gfx {
             pass.set_index_buffer(self.mesh_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
 
+            if self.enemy_visible {
+                pass.set_pipeline(&self.block_pipeline);
+                pass.set_vertex_buffer(0, self.enemy_vertices.slice(..));
+                pass.set_index_buffer(self.enemy_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.enemy_index_count, 0, 0..1);
+                if self.enemy_cracked {
+                    pass.set_pipeline(&self.crack_pipeline);
+                    pass.set_vertex_buffer(0, self.enemy_crack_vertices.slice(..));
+                    pass.draw_indexed(0..self.enemy_index_count, 0, 0..1);
+                }
+            }
+
             if self.outline_visible {
                 pass.set_pipeline(&self.crack_pipeline);
                 pass.set_vertex_buffer(0, self.outline_vertices.slice(..));
@@ -569,10 +629,46 @@ struct App {
     mode: Mode,
     rocks: u32,
     mine_timer: f32,
+    enemy: Option<Enemy>,
+    dice: Dice,
+    attack_timer: f32,
+    /// Last roll and how long ago it happened.
+    last_roll: Option<(u32, u32, f32)>,
     _music: Option<music::Music>,
 }
 
 impl App {
+    /// The enemy's bounding box, if he is in reach, under the crosshair, and not behind a block.
+    fn enemy_in_sights(&self) -> Option<(Vec3, Vec3)> {
+        let enemy = self.enemy.as_ref()?;
+        let (eye, dir) = (self.player.eye(), self.player.forward());
+        let (min, max) = enemy.bounds();
+        let dist = enemy::ray_box(eye, dir, min, max).filter(|d| *d <= REACH)?;
+        if let Some((x, y, z)) = self.world.raycast(eye, dir, REACH) {
+            let block_min = Vec3::new(x as f32, y as f32, z as f32);
+            let block_dist = enemy::ray_box(eye, dir, block_min, block_min + Vec3::ONE);
+            if block_dist.is_some_and(|d| d < dist) {
+                return None;
+            }
+        }
+        Some((min, max))
+    }
+
+    /// One attack tick: roll 2d6 and deal that much damage if the enemy is in sights.
+    fn attack(&mut self) {
+        if self.enemy_in_sights().is_none() {
+            return;
+        }
+        let (a, b) = self.dice.roll_2d6();
+        self.last_roll = Some((a, b, 0.0));
+        if let Some(enemy) = &mut self.enemy {
+            enemy.health -= (a + b) as i32;
+            if enemy.health <= 0 {
+                self.enemy = None;
+            }
+        }
+    }
+
     fn mine(&mut self) {
         let Some((x, y, z)) =
             self.world
@@ -697,6 +793,23 @@ impl ApplicationHandler for App {
                     self.mine_timer = 0.0;
                 }
 
+                // Attack mode: while the button is held, hit once per second.
+                if self.mode == Mode::Attack && self.keys.mining {
+                    self.attack_timer += dt;
+                    if self.attack_timer >= ATTACK_INTERVAL {
+                        self.attack_timer -= ATTACK_INTERVAL;
+                        self.attack();
+                    }
+                } else {
+                    self.attack_timer = 0.0;
+                }
+                if let Some((_, _, age)) = &mut self.last_roll {
+                    *age += dt;
+                }
+                if self.last_roll.is_some_and(|(_, _, age)| age > ROLL_DISPLAY_SECONDS) {
+                    self.last_roll = None;
+                }
+
                 // Cracks grow with the timer: light after 1 second, heavy after 2.
                 let stage = (self.mine_timer / (MINE_INTERVAL / 3.0)) as u32;
                 let target = if self.mode == Mode::Mine {
@@ -709,15 +822,41 @@ impl ApplicationHandler for App {
                     .filter(|_| stage >= 1)
                     .map(|block| (block, stage.min(2)));
 
+                // One wireframe at a time: the block in mine mode, the enemy in attack mode.
+                let outline = target
+                    .map(|(x, y, z)| {
+                        let min = Vec3::new(x as f32, y as f32, z as f32);
+                        (min, min + Vec3::ONE)
+                    })
+                    .or_else(|| {
+                        if self.mode == Mode::Attack {
+                            self.enemy_in_sights()
+                        } else {
+                            None
+                        }
+                    });
+
+                let look_at = self.player.pos;
+                let enemy_mesh = self.enemy.as_ref().map(|e| {
+                    let body = e.mesh(look_at, false);
+                    let cracks = e.cracked().then(|| e.mesh(look_at, true));
+                    (body, cracks)
+                });
+                let roll_text = self
+                    .last_roll
+                    .map(|(a, b, _)| format!("2D6: {a} + {b} = {}", a + b));
+
                 if let Some(gfx) = &mut self.gfx {
-                    gfx.set_outline(target);
+                    gfx.set_outline(outline);
                     gfx.set_crack(crack);
+                    gfx.set_enemy(enemy_mesh);
                     let hud = hud::build(
                         gfx.config.width,
                         gfx.config.height,
                         self.rocks,
                         self.mode.label(),
                         self.mode.color(),
+                        roll_text.as_deref(),
                     );
                     gfx.render(self.player.eye(), self.player.forward(), &hud);
                 }
@@ -748,6 +887,7 @@ fn main() {
 
     let world = World::generate(seed);
     let player = Player::new(world.spawn_point());
+    let enemy_spot = world.enemy_spot();
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -760,6 +900,10 @@ fn main() {
         mode: Mode::Mine,
         rocks: 0,
         mine_timer: 0.0,
+        enemy: Some(Enemy::new(enemy_spot)),
+        dice: Dice::new(),
+        attack_timer: 0.0,
+        last_roll: None,
         _music: music::Music::start(),
     };
     event_loop.run_app(&mut app).unwrap();

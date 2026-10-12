@@ -1,10 +1,11 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 13; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 16; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
-                            // 12 solid near-black (target outline)
+                            // 12 solid near-black (target outline),
+                            // 13 bone, 14 skull face, 15 ribs
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -14,6 +15,7 @@ const BARK: [f32; 3] = [104.0, 82.0, 52.0];
 const WOOD: [f32; 3] = [170.0, 138.0, 86.0];
 const LEAVES: [f32; 3] = [58.0, 128.0, 38.0];
 const NEEDLES: [f32; 3] = [28.0, 82.0, 52.0];
+const BONE: [f32; 3] = [226.0, 222.0, 205.0];
 const SNOW: [f32; 3] = [238.0, 243.0, 250.0];
 
 fn shaded(base: [f32; 3], x: u32, y: u32, seed: u32) -> [u8; 4] {
@@ -109,6 +111,26 @@ fn tile(layer: u32) -> Vec<u8> {
                     let ring = (x as f32 - 7.5).abs().max((y as f32 - 7.5).abs()) as u32;
                     let base = if ring % 2 == 0 { WOOD } else { [BARK[0] * 1.3, BARK[1] * 1.3, BARK[2] * 1.3] };
                     shaded(base, x, y, 32)
+                }
+                13 => shaded(BONE, x, y, 50),
+                14 => {
+                    let eye = (3..6).contains(&x) || (10..13).contains(&x);
+                    let socket = eye && (5..8).contains(&y);
+                    let nose = (7..9).contains(&x) && (8..10).contains(&y);
+                    let teeth = (11..13).contains(&y) && (4..12).contains(&x) && x % 2 == 0;
+                    if socket || nose || teeth {
+                        [30, 28, 28, 255]
+                    } else {
+                        shaded(BONE, x, y, 51)
+                    }
+                }
+                15 => {
+                    let rib = y % 3 == 1 && (2..14).contains(&x) && x != 7 && x != 8;
+                    if rib {
+                        [96, 92, 82, 255]
+                    } else {
+                        shaded(BONE, x, y, 52)
+                    }
                 }
                 8 => shaded(LEAVES, x, y, 33),
                 9 => shaded(NEEDLES, x, y, 34),
