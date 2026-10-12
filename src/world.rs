@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
@@ -134,9 +132,6 @@ pub struct World {
     /// Per column: water here belongs to a pond, lake or river that is entirely in the snow
     /// biome, so it is drawn as ice.
     frozen: Vec<bool>,
-    /// For bodies of water that have flowed into dug holes: how many blocks of surface they
-    /// are short, keyed by the body's lowest cell.
-    water_missing: HashMap<(i32, i32, i32), u32>,
 }
 
 pub fn hash(x: u32, y: u32, seed: u32) -> f32 {
@@ -389,7 +384,6 @@ impl World {
             top_y,
             cold,
             frozen,
-            water_missing: HashMap::new(),
         };
         world.plant_trees(seed);
         world
@@ -798,68 +792,14 @@ impl World {
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
     }
 
-    /// Every liquid cell connected to `start`: one body of water, which acts as a single
-    /// system with a single level.
-    fn water_body(&self, start: (i32, i32, i32)) -> HashSet<(i32, i32, i32)> {
-        let mut body = HashSet::new();
-        let mut stack = vec![start];
-        body.insert(start);
-        while let Some((x, y, z)) = stack.pop() {
-            for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
-                let n = (x + dx, y + dy, z + dz);
-                if self.is_liquid(n.0, n.1, n.2) && body.insert(n) {
-                    stack.push(n);
-                }
-            }
-        }
-        body
-    }
-
-    /// Water fills a cell that was just emptied, if there is water above or beside it.
-    ///
-    /// All the connected water is one system. The hole fills from the whole body, which
-    /// means the body is now one block short of a full surface. The surface stays put until
-    /// the missing blocks add up to a whole layer, and then the level drops by one block.
+    /// A cell that was just dug out fills with water if there is water above it or beside
+    /// it. The water above doesn't go down: the hole just extends the water.
     fn flow_into(&mut self, x: i32, y: i32, z: i32) {
-        let start = [(x, y + 1, z), (x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
+        let wet = [(x, y + 1, z), (x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
             .into_iter()
-            .find(|&(a, b, c)| self.is_liquid(a, b, c));
-        let Some(start) = start else {
-            return;
-        };
-        let mut body = self.water_body(start);
-        self.set_cell(x, y, z, Block::Water);
-        body.insert((x, y, z));
-
-        // Gather what this body was already short, plus the block that just flowed in.
-        let mut missing = 1u32;
-        self.water_missing.retain(|cell, count| {
-            let ours = body.contains(cell);
-            if ours {
-                missing += *count;
-            }
-            !ours
-        });
-
-        // Each time the shortfall covers the whole surface, the surface goes.
-        let mut top = body.iter().map(|c| c.1).max().unwrap_or(0);
-        loop {
-            let layer: Vec<_> = body.iter().filter(|c| c.1 == top).copied().collect();
-            if layer.is_empty() || (missing as usize) < layer.len() {
-                break;
-            }
-            missing -= layer.len() as u32;
-            for cell in layer {
-                self.set_cell(cell.0, cell.1, cell.2, Block::Air);
-                body.remove(&cell);
-            }
-            top -= 1;
-        }
-        // Remember the shortfall against the body's lowest cell.
-        if missing > 0 {
-            if let Some(cell) = body.iter().min_by_key(|c| (c.1, c.2, c.0)) {
-                self.water_missing.insert(*cell, missing);
-            }
+            .any(|(a, b, c)| self.is_liquid(a, b, c));
+        if wet {
+            self.set_cell(x, y, z, Block::Water);
         }
     }
 
@@ -1169,37 +1109,28 @@ mod tests {
     }
 
     #[test]
-    fn digging_under_water_floods_the_hole_and_the_level_drops_only_after_enough_holes() {
-        // Find a small pond: a body of water whose surface is a few dozen blocks.
+    fn digging_under_water_fills_the_hole_and_leaves_the_surface_alone() {
         let top = WATER_LEVEL as i32 - 1;
-        for seed in 1..=8 {
-            let mut w = World::generate(seed);
-            let pond = (0..SIZE_Z)
-                .flat_map(|z| (0..SIZE_X).map(move |x| (x as i32, z as i32)))
-                .filter(|&(x, z)| w.is_liquid(x, top, z))
-                .find_map(|(x, z)| {
-                    let body = w.water_body((x, top, z));
-                    (body.len() < 60).then_some(body)
-                });
-            let Some(pond) = pond else { continue };
-            let surface: Vec<_> = pond.iter().filter(|c| c.1 == top).copied().collect();
-            let beds: Vec<_> = surface
-                .iter()
-                .map(|&(x, _, z)| (x, w.heights[z as usize * SIZE_X + x as usize] as i32 - 1, z))
-                .collect();
-
-            let all_surface = |w: &World, block| surface.iter().all(|&(x, y, z)| w.get(x, y, z) == block);
-            for (i, &(x, y, z)) in beds.iter().enumerate() {
-                assert!(w.remove_block(x, y, z).is_some());
-                assert_eq!(w.get(x, y, z), Block::Water, "the hole fills with water");
-                if i + 1 < beds.len() {
-                    assert!(all_surface(&w, Block::Water), "level holds after {} holes", i + 1);
-                }
-            }
-            assert!(all_surface(&w, Block::Air), "a whole surface of holes lowers the level");
-            return;
-        }
-        panic!("no small pond in any test world");
+        let mut w = World::generate(1);
+        // Open water at least two deep, with water on every side.
+        let (x, z) = (0..SIZE_Z)
+            .flat_map(|z| (0..SIZE_X).map(move |x| (x as i32, z as i32)))
+            .find(|&(x, z)| {
+                let h = w.heights[z as usize * SIZE_X + x as usize] as i32;
+                h <= top - 1
+                    && !w.frozen[z as usize * SIZE_X + x as usize]
+                    && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .all(|(dx, dz)| w.is_liquid(x + dx, h, z + dz))
+            })
+            .expect("a deep spot");
+        let bed = w.heights[z as usize * SIZE_X + x as usize] as i32 - 1;
+        assert!(w.remove_block(x, bed, z).is_some());
+        assert_eq!(w.get(x, bed, z), Block::Water, "the hole fills with water");
+        // And you can keep digging down: each new hole is water too.
+        assert!(w.remove_block(x, bed - 1, z).is_some());
+        assert_eq!(w.get(x, bed - 1, z), Block::Water);
+        assert_eq!(w.get(x, top, z), Block::Water, "the surface is untouched");
     }
 
     #[test]
