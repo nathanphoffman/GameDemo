@@ -18,6 +18,9 @@ impl App {
 
         // One crack stage, halfway through the mining time.
         let stage = if self.mine_timer >= MINE_INTERVAL / 2.0 { 1 } else { 0 };
+        let (px, pz) = (self.player.pos.x.floor() as i32, self.player.pos.z.floor() as i32);
+        self.weather.snowing = self.world.is_cold(px, pz);
+        self.weather.underwater = self.world.in_water(self.player.eye());
         self.weather.update(dt);
 
         let conversion_boost = self.update_background(dt);
@@ -72,7 +75,7 @@ impl App {
                         .selected()
                         .map(|kind| (kind, self.converter.fraction())),
                     ctrl_held: self.keys.ctrl,
-                    weather_label: self.weather.kind.label(),
+                    weather_label: self.weather.label(),
                     selection: self
                         .selected_dense
                         .map(|kind| (kind, self.resources.dense[kind])),

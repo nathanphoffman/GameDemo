@@ -2,12 +2,11 @@ use glam::Vec3;
 
 use crate::world::{hash, Vertex};
 
-/// Seconds of gameplay between weather checks. Normally 60.0.
-pub const CHECK_INTERVAL_SECONDS: f32 = 15.0;
-/// Chance that a check changes the weather, from 0 to 1. Normally 0.10.
-///
-/// Both of these are turned up for testing: the weather changes every 15 seconds.
-pub const CHANGE_CHANCE: f32 = 1.0;
+/// Seconds of gameplay between weather checks.
+pub const CHECK_INTERVAL_SECONDS: f32 = 300.0;
+/// Chance that a check picks one of the non-sunny kinds, from 0 to 1. Otherwise the weather
+/// is sunny, so about two checks in three give sun.
+pub const NON_SUNNY_CHANCE: f32 = 1.0 / 3.0;
 
 /// How long a change takes to fade in (roughly: it is 95% of the way there by then).
 const BLEND_SECONDS: f32 = 4.0;
@@ -100,6 +99,10 @@ pub struct Weather {
     pub params: Params,
     /// How far the clouds have drifted, in cloud cells.
     pub cloud_offset: [f32; 2],
+    /// The player is in the cold biome, where rain falls as snow. Set by the game each frame.
+    pub snowing: bool,
+    /// The camera is under water, so the scene is drawn blue. Set by the game each frame.
+    pub underwater: bool,
     clock: f32,
     check_interval: f32,
     chance: f32,
@@ -108,7 +111,7 @@ pub struct Weather {
 
 impl Weather {
     pub fn new(seed: u32) -> Weather {
-        Weather::with_settings(seed, CHECK_INTERVAL_SECONDS, CHANGE_CHANCE)
+        Weather::with_settings(seed, CHECK_INTERVAL_SECONDS, NON_SUNNY_CHANCE)
     }
 
     pub fn with_settings(seed: u32, check_interval: f32, chance: f32) -> Weather {
@@ -116,10 +119,21 @@ impl Weather {
             kind: Kind::Sunny,
             params: Kind::Sunny.params(),
             cloud_offset: [0.0, 0.0],
+            snowing: false,
+            underwater: false,
             clock: 0.0,
             check_interval,
             chance,
             rng: seed.max(1),
+        }
+    }
+
+    /// Shown in the corner of the screen: the kind's name, with rain called snow in the cold.
+    pub fn label(&self) -> &'static str {
+        match (self.kind, self.snowing) {
+            (Kind::LightRain, true) => "SNOW",
+            (Kind::HeavyRain, true) => "HEAVY SNOW",
+            (kind, _) => kind.label(),
         }
     }
 
@@ -143,9 +157,11 @@ impl Weather {
         self.clock += dt;
         while self.clock >= self.check_interval {
             self.clock -= self.check_interval;
-            if self.unit() < self.chance {
-                self.kind = self.pick_other();
-            }
+            self.kind = if self.unit() < self.chance {
+                self.pick_non_sunny()
+            } else {
+                Kind::Sunny
+            };
         }
 
         let rate = 3.0 / BLEND_SECONDS; // 1 - e^-3 is about 95%
@@ -157,11 +173,11 @@ impl Weather {
         self.cloud_offset[1] += BASE_DRIFT[1] * speed * dt;
     }
 
-    /// A random kind of weather other than the current one.
-    fn pick_other(&mut self) -> Kind {
+    /// A random kind of weather other than sunny. It can be the same as the current one.
+    fn pick_non_sunny(&mut self) -> Kind {
         let others: Vec<Kind> = Kind::ALL
             .into_iter()
-            .filter(|k| *k != self.kind)
+            .filter(|k| *k != Kind::Sunny)
             .collect();
         others[(self.next_u32() >> 8) as usize % others.len()]
     }
@@ -191,6 +207,9 @@ const WIND_SPEED: f32 = 9.0;
 const RAIN_LAYER: f32 = 32.0;
 const WIND_LAYER: f32 = 33.0;
 const RAIN_WIDTH: f32 = 0.012;
+const SNOW_WIDTH: f32 = 0.035;
+/// Snowflakes drift down slowly, as short fat streaks.
+const SNOW_FALL_SPEED: f32 = 2.5;
 const WIND_WIDTH: f32 = 0.02;
 
 /// Where the wind blows, as a direction along the ground. It wanders a little over time.
@@ -215,6 +234,7 @@ pub fn streaks(
     time: f32,
     rain: f32,
     wind: f32,
+    snowing: bool,
 ) -> (Vec<Streak>, Vec<Streak>) {
     let wind_dir = wind_direction(time);
 
@@ -223,12 +243,12 @@ pub fn streaks(
     for i in 0..rain_count {
         let h = |k: u32| hash(i as u32, k, 0x4A1E);
         let base = Vec3::new(h(0), h(1), h(2)) * RAIN_BOX;
-        let fall = RAIN_FALL_SPEED * (0.8 + 0.4 * h(3));
+        let fall = if snowing { SNOW_FALL_SPEED } else { RAIN_FALL_SPEED } * (0.8 + 0.4 * h(3));
         // The wind leans the rain over, and each drop leans a little differently.
         let lean = wind * 3.0 * (0.8 + 0.4 * h(4));
         let velocity = Vec3::new(wind_dir.x * lean, -fall, wind_dir.z * lean);
         let position = wrap_into_box(base + velocity * time, cam, RAIN_BOX);
-        let length = 0.5 + 0.6 * h(5);
+        let length = if snowing { 0.1 + 0.1 * h(5) } else { 0.5 + 0.6 * h(5) };
         let tail = position - velocity.normalize() * length;
         rain_streaks.push((position, tail));
     }
@@ -260,8 +280,8 @@ pub fn streaks(
 }
 
 /// Flat quads for all the streaks, each turned to face the camera. Four vertices per streak.
-pub fn streak_mesh(cam: Vec3, time: f32, rain: f32, wind: f32) -> Vec<Vertex> {
-    let (rain_streaks, wind_streaks) = streaks(cam, time, rain, wind);
+pub fn streak_mesh(cam: Vec3, time: f32, rain: f32, wind: f32, snowing: bool) -> Vec<Vertex> {
+    let (rain_streaks, wind_streaks) = streaks(cam, time, rain, wind, snowing);
     let mut out = Vec::with_capacity((rain_streaks.len() + wind_streaks.len()) * 4);
     let mut push = |(a, b): (Vec3, Vec3), half_width: f32, layer: f32| {
         let along = b - a;
@@ -277,7 +297,11 @@ pub fn streak_mesh(cam: Vec3, time: f32, rain: f32, wind: f32) -> Vec<Vertex> {
         }
     };
     for streak in rain_streaks {
-        push(streak, RAIN_WIDTH, RAIN_LAYER);
+        if snowing {
+            push(streak, SNOW_WIDTH, WIND_LAYER); // plain white
+        } else {
+            push(streak, RAIN_WIDTH, RAIN_LAYER);
+        }
     }
     for streak in wind_streaks {
         push(streak, WIND_WIDTH, WIND_LAYER);
@@ -298,46 +322,35 @@ mod tests {
     }
 
     #[test]
-    fn starts_sunny_and_a_certain_change_happens_at_every_check() {
-        let mut w = Weather::with_settings(7, 15.0, 1.0);
+    fn starts_sunny_and_only_changes_at_each_check() {
+        let mut w = Weather::with_settings(7, 300.0, 1.0);
         assert_eq!(w.kind, Kind::Sunny);
-        run(&mut w, 14.0);
+        run(&mut w, 299.0);
         assert_eq!(w.kind, Kind::Sunny, "not before the first check");
         run(&mut w, 1.5);
-        assert_ne!(w.kind, Kind::Sunny, "changed at 15 seconds");
-
-        // And it keeps changing, never repeating the same weather back to back.
-        let mut previous = w.kind;
-        for _ in 0..20 {
-            run(&mut w, 15.0);
-            assert_ne!(w.kind, previous);
-            previous = w.kind;
-        }
+        assert_ne!(w.kind, Kind::Sunny, "a certain change happens at 5 minutes");
     }
 
     #[test]
-    fn a_zero_chance_never_changes_and_a_small_one_changes_rarely() {
-        let mut never = Weather::with_settings(3, 15.0, 0.0);
-        run(&mut never, 600.0);
+    fn a_zero_chance_stays_sunny_and_one_in_three_checks_is_not_sunny() {
+        let mut never = Weather::with_settings(3, 300.0, 0.0);
+        run(&mut never, 3000.0);
         assert_eq!(never.kind, Kind::Sunny);
 
-        // 10% per minute: over a couple of hours of play it changes some, but far from always.
-        let mut rare = Weather::with_settings(11, 60.0, 0.10);
-        let mut changes = 0;
-        let mut last = rare.kind;
-        for _ in 0..200 {
-            run(&mut rare, 60.0);
-            if rare.kind != last {
-                changes += 1;
-                last = rare.kind;
+        let mut w = Weather::with_settings(11, 300.0, NON_SUNNY_CHANCE);
+        let mut not_sunny = 0;
+        for _ in 0..300 {
+            run(&mut w, 300.0);
+            if w.kind != Kind::Sunny {
+                not_sunny += 1;
             }
         }
-        assert!((5..60).contains(&changes), "{changes} changes in 200 checks");
+        assert!((70..130).contains(&not_sunny), "{not_sunny} of 300 checks not sunny");
     }
 
     #[test]
     fn every_kind_shows_up_eventually() {
-        let mut w = Weather::with_settings(5, 15.0, 1.0);
+        let mut w = Weather::with_settings(5, 15.0, 0.5);
         let mut seen = vec![Kind::Sunny];
         for _ in 0..100 {
             run(&mut w, 15.0);
@@ -388,7 +401,7 @@ mod tests {
     fn streak_counts_follow_rain_and_wind() {
         let cam = Vec3::new(100.0, 20.0, 100.0);
         let count = |rain: f32, wind: f32| {
-            let (r, w) = streaks(cam, 3.0, rain, wind);
+            let (r, w) = streaks(cam, 3.0, rain, wind, false);
             (r.len(), w.len())
         };
         assert_eq!(count(0.0, 0.3), (0, 0), "sunny: nothing");
@@ -400,15 +413,15 @@ mod tests {
         let (_, gale) = count(0.0, 1.0);
         assert_eq!(calm_wind, 0, "a breeze has no streaks");
         assert_eq!(gale, MAX_WIND);
-        assert_eq!(streak_mesh(cam, 3.0, 1.0, 1.0).len(), (MAX_RAIN + MAX_WIND) * 4);
-        assert!(streak_mesh(cam, 3.0, 1.0, 1.0).len() <= MAX_STREAK_VERTICES);
+        assert_eq!(streak_mesh(cam, 3.0, 1.0, 1.0, false).len(), (MAX_RAIN + MAX_WIND) * 4);
+        assert!(streak_mesh(cam, 3.0, 1.0, 1.0, false).len() <= MAX_STREAK_VERTICES);
     }
 
     #[test]
     fn streaks_stay_where_they_are_in_the_world_when_the_player_moves() {
         let cam = Vec3::new(100.0, 20.0, 100.0);
-        let (before, before_wind) = streaks(cam, 5.0, 1.0, 1.0);
-        let (after, after_wind) = streaks(cam + Vec3::new(1.5, 0.0, -1.0), 5.0, 1.0, 1.0);
+        let (before, before_wind) = streaks(cam, 5.0, 1.0, 1.0, false);
+        let (after, after_wind) = streaks(cam + Vec3::new(1.5, 0.0, -1.0), 5.0, 1.0, 1.0, false);
         // Almost every streak is at exactly the same place in the world; only the few that
         // had to wrap around to the other side of the box have jumped.
         let same = |a: &[(Vec3, Vec3)], b: &[(Vec3, Vec3)]| {
@@ -429,8 +442,8 @@ mod tests {
     #[test]
     fn rain_falls_and_stays_near_the_player() {
         let cam = Vec3::new(50.0, 30.0, 50.0);
-        let (now, _) = streaks(cam, 2.0, 1.0, 0.0);
-        let (later, _) = streaks(cam, 2.05, 1.0, 0.0);
+        let (now, _) = streaks(cam, 2.0, 1.0, 0.0, false);
+        let (later, _) = streaks(cam, 2.05, 1.0, 0.0, false);
         let dropped = now
             .iter()
             .zip(&later)
@@ -447,7 +460,7 @@ mod tests {
 
     #[test]
     fn wind_streaks_are_not_parallel() {
-        let (_, wind) = streaks(Vec3::new(0.0, 20.0, 0.0), 1.0, 0.0, 1.0);
+        let (_, wind) = streaks(Vec3::new(0.0, 20.0, 0.0), 1.0, 0.0, 1.0, false);
         let directions: Vec<Vec3> = wind
             .iter()
             .map(|(head, tail)| (*head - *tail).normalize())

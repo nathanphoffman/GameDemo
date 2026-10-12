@@ -127,6 +127,11 @@ pub struct World {
     heights: Vec<u8>,
     /// One above the highest non-air block, so meshing can skip the empty sky.
     top_y: usize,
+    /// Per column: in the snow biome.
+    cold: Vec<bool>,
+    /// Per column: water here belongs to a pond, lake or river that is entirely in the snow
+    /// biome, so it is drawn as ice.
+    frozen: Vec<bool>,
 }
 
 pub fn hash(x: u32, y: u32, seed: u32) -> f32 {
@@ -178,11 +183,23 @@ fn smoothstep(t: f32) -> f32 {
 /// 0 = pure grass country, 1 = pure snow country. Snow is on the east side, grass on the
 /// west, with a fairly narrow border in the middle. Noise only wobbles the border a little.
 fn snow_amount(x: usize, z: usize, seed: u32) -> f32 {
+    snow_ramp(x, z, seed, 0.5)
+}
+
+/// Same border as `snow_amount`, but the grass-to-snow ground colour changes over a much
+/// shorter distance, so the speckled mix is only a narrow strip.
+fn surface_snow(x: usize, z: usize, seed: u32) -> f32 {
+    snow_ramp(x, z, seed, 0.12)
+}
+
+/// `width` is how much the coldness changes between all grass and all snow (0.5 is a wide,
+/// slow change, 0.1 a quick one).
+fn snow_ramp(x: usize, z: usize, seed: u32, width: f32) -> f32 {
     let (fx, fz) = (x as f32, z as f32);
     let wobble = (fbm_with(fx / 70.0, fz / 70.0, seed ^ 0xB10E, 3, 0.4, false) - 0.5) * 0.5;
     // Goes from about -0.25 on the west edge to 1.25 on the east edge.
     let coldness = 0.5 + wobble + (fx / SIZE_X as f32 - 0.5) * 1.5;
-    ((coldness - 0.25) / 0.5).clamp(0.0, 1.0)
+    ((coldness - 0.5) / width + 0.5).clamp(0.0, 1.0)
 }
 
 /// Low, long, gentle rolling hills.
@@ -343,7 +360,7 @@ impl World {
                 let top = if h <= WATER_LEVEL {
                     Block::Dirt
                 } else {
-                    Self::surface_block(x, z, snow_amount(x, z, seed), seed)
+                    Self::surface_block(x, z, surface_snow(x, z, seed), seed)
                 };
                 // Snowy country has rock under the snow; grassy country has dirt.
                 let under = if top == Block::Snow { Block::Stone } else { Block::Dirt };
@@ -355,11 +372,69 @@ impl World {
                 }
             }
         }
+        let cold: Vec<bool> = (0..SIZE_X * SIZE_Z)
+            .map(|i| surface_snow(i % SIZE_X, i / SIZE_X, seed) > 0.5)
+            .collect();
+        let frozen = Self::frozen_columns(&heights, &cold);
         // Trees reach about a dozen blocks above the ground.
         let top_y = (heights.iter().copied().max().unwrap_or(0) as usize + 12).min(SIZE_Y);
-        let mut world = World { blocks, heights, top_y };
+        let mut world = World { blocks, heights, top_y, cold, frozen };
         world.plant_trees(seed);
         world
+    }
+
+    /// Marks the columns of every body of water that lies completely inside the snow biome.
+    fn frozen_columns(heights: &[u8], cold: &[bool]) -> Vec<bool> {
+        let wet = |i: usize| (heights[i] as usize) < WATER_LEVEL;
+        let mut frozen = vec![false; heights.len()];
+        let mut seen = vec![false; heights.len()];
+        for start in 0..heights.len() {
+            if seen[start] || !wet(start) {
+                continue;
+            }
+            // Flood out over this body of water, noting whether any of it is outside the cold.
+            let (mut body, mut stack, mut all_cold) = (Vec::new(), vec![start], true);
+            seen[start] = true;
+            while let Some(i) = stack.pop() {
+                body.push(i);
+                all_cold &= cold[i];
+                let (x, z) = (i % SIZE_X, i / SIZE_X);
+                let mut next = Vec::with_capacity(4);
+                if x > 0 {
+                    next.push(i - 1);
+                }
+                if x + 1 < SIZE_X {
+                    next.push(i + 1);
+                }
+                if z > 0 {
+                    next.push(i - SIZE_X);
+                }
+                if z + 1 < SIZE_Z {
+                    next.push(i + SIZE_X);
+                }
+                for n in next {
+                    if !seen[n] && wet(n) {
+                        seen[n] = true;
+                        stack.push(n);
+                    }
+                }
+            }
+            if all_cold {
+                for i in body {
+                    frozen[i] = true;
+                }
+            }
+        }
+        frozen
+    }
+
+    /// Whether the column is in the snow biome.
+    pub fn is_cold(&self, x: i32, z: i32) -> bool {
+        x >= 0
+            && z >= 0
+            && x < SIZE_X as i32
+            && z < SIZE_Z as i32
+            && self.cold[z as usize * SIZE_X + x as usize]
     }
 
     fn set_if_air(&mut self, x: i32, y: i32, z: i32, block: Block) {
@@ -528,12 +603,18 @@ impl World {
         if y < 0 || x < 0 || z < 0 || x >= SIZE_X as i32 || z >= SIZE_Z as i32 {
             return true;
         }
-        !matches!(self.get(x, y, z), Block::Air | Block::Water)
+        self.get(x, y, z) != Block::Air && !self.is_liquid(x, y, z)
     }
 
-    /// Is there water in the cell containing this point?
+    /// Is there water you can swim through in the cell containing this point? Ice doesn't
+    /// count: that is solid.
     pub fn in_water(&self, p: Vec3) -> bool {
-        self.get(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32) == Block::Water
+        self.is_liquid(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+    }
+
+    /// Water that isn't frozen over.
+    fn is_liquid(&self, x: i32, y: i32, z: i32) -> bool {
+        self.get(x, y, z) == Block::Water && !self.frozen[z as usize * SIZE_X + x as usize]
     }
 
     /// Does the box from `min` to `max` overlap any solid block?
@@ -588,7 +669,8 @@ impl World {
         }
         let mut previous: Option<(i32, i32, i32)> = None;
         loop {
-            if !matches!(self.get(cell[0], cell[1], cell[2]), Block::Air | Block::Water) {
+            let (x, y, z) = (cell[0], cell[1], cell[2]);
+            if self.get(x, y, z) != Block::Air && !self.is_liquid(x, y, z) {
                 return Some(RayHit {
                     block: (cell[0], cell[1], cell[2]),
                     place: previous,
@@ -668,7 +750,10 @@ impl World {
             && x < SIZE_X as i32
             && y < SIZE_Y as i32
             && z < SIZE_Z as i32;
-        if !inside || block == Block::Air || !matches!(self.get(x, y, z), Block::Air | Block::Water) {
+        if !inside
+            || block == Block::Air
+            || (self.get(x, y, z) != Block::Air && !self.is_liquid(x, y, z))
+        {
             return false;
         }
         self.blocks[Self::index(x as usize, y as usize, z as usize)] = block;
@@ -832,9 +917,19 @@ impl World {
                     }
                     for face in &FACES {
                         let [nx, ny, nz] = face.normal;
-                        // Cells holding the plant don't hide the faces next to them.
+                        // Cells holding the plant don't hide the faces next to them. Neither
+                        // does liquid water (the lake bed has to be there to see), but water
+                        // does hide its own sides, and ice hides everything under it.
                         let beside = self.get(x + nx, y + ny, z + nz);
-                        if !matches!(beside, Block::Air | Block::HousePlant) {
+                        let hidden = match beside {
+                            Block::Air | Block::HousePlant => false,
+                            Block::Water => {
+                                block == Block::Water
+                                    || self.frozen[(z + nz) as usize * SIZE_X + (x + nx) as usize]
+                            }
+                            _ => true,
+                        };
+                        if hidden {
                             continue;
                         }
                         if face.kind == 2 && y == 0 {
@@ -854,6 +949,7 @@ impl World {
                             (Block::PineLeaves, _) => 9.0,
                             (Block::Burning, _) => 22.0,
                             (Block::Coal, _) => 23.0,
+                            (Block::Water, _) if self.frozen[z as usize * SIZE_X + x as usize] => 34.0,
                             (Block::Water, _) => 24.0,
                             (Block::WoodFloor, _) => 25.0,
                             (Block::StoneFloor, _) => 26.0,

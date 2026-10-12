@@ -1,7 +1,7 @@
 use crate::world::hash;
 
 pub const TILE: u32 = 16;
-pub const LAYERS: u32 = 34; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
+pub const LAYERS: u32 = 35; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 snow side, 5 stone,
                             // 6 log side, 7 log top, 8 leaves, 9 pine needles,
                             // 10 light cracks, 11 heavy cracks (transparent overlays),
                             // 12 solid near-black (target outline),
@@ -9,7 +9,7 @@ pub const LAYERS: u32 = 34; // 0 grass top, 1 grass side, 2 dirt, 3 snow top, 4 
                             // 18 deer fur, 19 deer face, 20 pine bark, 21 pine log top,
                             // 22 fire, 23 coal, 24 water,
                             // 25 wood floor, 26 stone floor, 27 forge, 28 flower pot, 29 furnace, 30 potting soil,
-                            // 31 plant leaves, 32 rain, 33 wind
+                            // 31 plant leaves, 32 rain, 33 wind, 34 ice
 pub const MIP_LEVELS: u32 = 5; // 16, 8, 4, 2, 1
 
 const GRASS: [f32; 3] = [88.0, 150.0, 50.0];
@@ -198,6 +198,16 @@ fn tile(layer: u32) -> Vec<u8> {
                     let ripple = hash(x, y, 64) * 0.5 + hash(x / 2, y, 65) * 0.5;
                     let k = 0.8 + 0.4 * ripple;
                     [(40.0 * k) as u8, (110.0 * k) as u8, (215.0 * k).min(255.0) as u8, 255]
+                }
+                // Ice: pale blue with lighter scratches.
+                34 => {
+                    let scratch = (x + y) % 7 == 0 && hash(x / 2, y / 2, 81) > 0.4;
+                    let k = 0.94 + 0.12 * hash(x, y, 80);
+                    if scratch {
+                        [225, 242, 252, 255]
+                    } else {
+                        [(165.0 * k) as u8, (210.0 * k) as u8, (240.0 * k).min(255.0) as u8, 255]
+                    }
                 }
                 // Wooden floor: horizontal planks with dark seams.
                 25 => {

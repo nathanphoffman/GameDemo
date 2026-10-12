@@ -6,7 +6,7 @@ struct Globals {
     // x = fog start, y = fog end, z = overcast (0 clear .. 1 grey), w = dimming.
     fog: vec4<f32>,
     // xy = how far the clouds have drifted (the rain and wind are drawn as streaks in the
-    // world instead).
+    // world instead), z = 1 when the camera is under water.
     sky: vec4<f32>,
 };
 
@@ -133,6 +133,12 @@ fn block_vs(
 fn block_fs(in: BlockOut) -> @location(0) vec4<f32> {
     let c = textureSample(blocks, block_sampler, in.uv, in.layer).rgb * in.shade * (1.0 - g.fog.w * 0.6);
     let d = length(in.world - g.cam.xyz);
+    if (g.sky.z > 0.5) {
+        // Under water: everything goes blue and fades out within a few blocks.
+        let tinted = mix(c * vec3<f32>(0.55, 0.8, 1.0), vec3<f32>(0.05, 0.22, 0.45), 0.35);
+        let murk = smoothstep(2.0, 32.0, d);
+        return vec4(mix(tinted, vec3<f32>(0.04, 0.17, 0.38), murk), 1.0);
+    }
     let fog = smoothstep(g.fog.x, g.fog.y, d);
     return vec4(mix(c, horizon_color(), fog), 1.0);
 }

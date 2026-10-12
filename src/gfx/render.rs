@@ -23,11 +23,22 @@ impl Gfx {
                 weather.params.overcast,
                 weather.params.dim,
             ],
-            sky: [weather.cloud_offset[0], weather.cloud_offset[1], 0.0, 0.0],
+            sky: [
+                weather.cloud_offset[0],
+                weather.cloud_offset[1],
+                if weather.underwater { 1.0 } else { 0.0 },
+                0.0,
+            ],
         };
 
         // Rain and wind streaks, placed in the world around the player.
-        let streaks = weather::streak_mesh(eye, time, weather.params.rain, weather.params.wind);
+        // No rain or wind streaks under water.
+        let (rain, wind) = if weather.underwater {
+            (0.0, 0.0)
+        } else {
+            (weather.params.rain, weather.params.wind)
+        };
+        let streaks = weather::streak_mesh(eye, time, rain, wind, weather.snowing);
         self.queue
             .write_buffer(&self.weather_vertices, 0, bytemuck::cast_slice(&streaks));
         self.weather_index_count = (streaks.len() / 4 * 6) as u32;
