@@ -29,6 +29,14 @@
 - [x] Creatures and other players are drawn blended between the host's updates, so they move
       smoothly.
 
+- [x] Other players' actions: you hear their digging (quieter with distance, silent past 40
+      blocks), see cracks on the block they are mining, and see their health bar over their head.
+      Creatures they fight show the damage on their own health bars.
+- [x] Play-tested: a scripted session over the network (`game-net/tests/play.rs`: build a floor
+      and a forge, place and mine blocks, fight the deer, with a second player watching), and the
+      real window driven with injected mouse and keyboard input (look, walk, jump, mine, place,
+      scroll-select, apply, open and close the menu).
+
 ## Left
 - **Weather**: the host rolls the weather for everyone (the biome bend and snow are worked out
   per player on the client now), but the host's own copy still uses the first player's biome.
@@ -39,6 +47,3 @@
 - **Creature spawning** with several real players spread out is untested.
 - **Memory and start-up in single player**: the host and the game each build their own copy of
   the world (about twice the memory, built at the same time).
-- **Other players' actions**: their digging and fighting make no sound or effect on your screen
-  yet (only your own).
-- **Play-testing**: the window code was run and checked by screenshot, but not played for long.

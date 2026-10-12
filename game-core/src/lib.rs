@@ -1,6 +1,8 @@
 //! The game's rules and state: the world, creatures, combat, weather. Nothing in here draws
 //! anything or opens a window, so a host program can use it without a screen.
 
+pub use glam;
+
 pub mod biome;
 pub mod combat;
 pub mod effects;

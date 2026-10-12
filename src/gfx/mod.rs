@@ -83,6 +83,9 @@ struct ChunkMesh {
     index_count: u32,
 }
 
+/// How many blocks other players can be seen cracking at once.
+pub(crate) const MAX_OTHER_CRACKS: usize = 32;
+
 pub(crate) struct Gfx {
     pub(crate) window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -102,6 +105,10 @@ pub(crate) struct Gfx {
     crack_vertices: wgpu::Buffer,
     crack_indices: wgpu::Buffer,
     crack_visible: bool,
+    /// Crack overlays on blocks other players are mining (24 vertices each).
+    other_crack_vertices: wgpu::Buffer,
+    other_crack_indices: wgpu::Buffer,
+    other_crack_index_count: u32,
     outline_vertices: wgpu::Buffer,
     outline_indices: wgpu::Buffer,
     outline_index_count: u32,
@@ -153,6 +160,18 @@ impl Gfx {
             self.queue
                 .write_buffer(&self.crack_vertices, 0, bytemuck::cast_slice(&vertices));
         }
+    }
+
+    /// Shows cracks on the blocks other players are mining.
+    pub(crate) fn set_other_cracks(&mut self, blocks: &[(i32, i32, i32)]) {
+        let blocks = &blocks[..blocks.len().min(MAX_OTHER_CRACKS)];
+        let mut vertices = Vec::with_capacity(blocks.len() * 24);
+        for &(x, y, z) in blocks {
+            vertices.extend(mesh::terrain::block_overlay(x, y, z, 10.0).0);
+        }
+        self.queue
+            .write_buffer(&self.other_crack_vertices, 0, bytemuck::cast_slice(&vertices));
+        self.other_crack_index_count = (blocks.len() * 36) as u32;
     }
 
     /// Replaces the mesh of one chunk, e.g. after a block in it was mined.

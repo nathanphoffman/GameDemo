@@ -94,10 +94,13 @@ impl Music {
         self.tune.set_volume((1.0 - self.levels[2]) * VOLUME);
     }
 
-    /// Plays the sound of mining `block` once. `ice` is for water that is frozen over.
-    pub fn dig(&self, block: Block, ice: bool) {
+    /// Plays the sound of mining `block` once, at `volume` (1 is full). `ice` is for water that
+    /// is frozen over. Someone else digging is quieter the further away they are.
+    pub fn dig_at(&self, block: Block, ice: bool, volume: f32) {
         if let Ok(source) = Decoder::new(Cursor::new(dig_sound(block, ice))) {
-            let _ = self.handle.play_raw(source.convert_samples());
+            let _ = self
+                .handle
+                .play_raw(source.convert_samples::<f32>().amplify(volume.clamp(0.0, 1.0)));
         }
     }
 }

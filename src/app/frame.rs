@@ -67,8 +67,16 @@ impl App {
             enemy_mesh.extend(mesh::creature::creature_mesh(e.kind, e.pos, e.health, facing));
         }
         for p in self.scene.players.iter().filter(|p| p.id != self.me) {
-            enemy_mesh.extend(mesh::creature::player_mesh(p.pos, p.yaw));
+            enemy_mesh.extend(mesh::creature::player_mesh(p.pos, p.yaw, p.hp, look_at));
         }
+
+        let other_cracks: Vec<(i32, i32, i32)> = self
+            .scene
+            .players
+            .iter()
+            .filter(|p| p.id != self.me)
+            .filter_map(|p| p.cracking)
+            .collect();
 
         self.recenter_cursor();
 
@@ -80,6 +88,7 @@ impl App {
             gfx.set_outline(outline);
             gfx.set_crack(crack);
             gfx.set_enemies(&enemy_mesh);
+            gfx.set_other_cracks(&other_cracks);
             let hud = hud::build(
                 gfx.config.width,
                 gfx.config.height,

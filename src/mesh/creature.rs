@@ -3,6 +3,7 @@
 use glam::Vec3;
 
 use super::{Vertex, FACES};
+use crate::combat::MAX_PLAYER_HP;
 use crate::enemy::Kind;
 
 // Texture layers (see textures.rs).
@@ -29,6 +30,9 @@ const TROUSERS: f32 = 58.0;
 const BAR_BACK: f32 = 12.0; // near-black border
 const BAR_LOST: f32 = 16.0; // red
 const BAR_HEALTH: f32 = 17.0; // green
+
+/// How tall a player is, for putting their health bar over their head.
+const PLAYER_HEIGHT: f32 = 1.85;
 
 /// Health bar size and how high it floats above the head, in blocks.
 const BAR_WIDTH: f32 = 0.9;
@@ -231,8 +235,9 @@ pub fn creature_mesh(kind: Kind, pos: Vec3, health: i32, look_at: Vec3) -> Vec<V
 }
 
 /// The body of a player standing at `pos` and looking along `yaw` (the same angle the camera
-/// uses, so the face is on the side they look toward).
-pub fn player_mesh(pos: Vec3, yaw: f32) -> Vec<Vertex> {
+/// uses, so the face is on the side they look toward), with a health bar over their head
+/// turned toward `look_at`, which is who is looking.
+pub fn player_mesh(pos: Vec3, yaw: f32, health: i32, look_at: Vec3) -> Vec<Vertex> {
     let front = Vec3::new(yaw.sin(), 0.0, -yaw.cos());
     let right = Vec3::new(front.z, 0.0, -front.x);
     let parts = vec![
@@ -249,17 +254,28 @@ pub fn player_mesh(pos: Vec3, yaw: f32) -> Vec<Vertex> {
         part([0.02, 0.0, -0.14], [0.3, 0.7, 0.14], [TROUSERS; 6]),
         part([-0.3, 0.0, -0.14], [-0.02, 0.7, 0.14], [TROUSERS; 6]),
     ];
-    let mut out = Vec::with_capacity(parts.len() * 24);
+    let mut out = Vec::with_capacity(parts.len() * 24 + 12);
     push_parts(&mut out, parts, pos, front, right);
+    let to_viewer = Vec3::new(look_at.x - pos.x, 0.0, look_at.z - pos.z)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    let bar_right = Vec3::new(to_viewer.z, 0.0, -to_viewer.x);
+    let fraction = health as f32 / MAX_PLAYER_HP as f32;
+    push_bar(&mut out, PLAYER_HEIGHT, fraction, pos, to_viewer, bar_right);
     out
 }
 
 /// Three flat quads facing the viewer: border, red (missing health), green (health left).
 /// The green one is anchored to one end so it shrinks as he takes damage.
 fn push_health_bar(kind: Kind, health: i32, out: &mut Vec<Vertex>, pos: Vec3, front: Vec3, right: Vec3) {
-    let max = kind.max_health() as f32;
-    let fraction = (health.max(0) as f32 / max).clamp(0.0, 1.0);
-    let center = pos + Vec3::Y * (kind.height() + BAR_LIFT);
+    let fraction = health as f32 / kind.max_health() as f32;
+    push_bar(out, kind.height(), fraction, pos, front, right);
+}
+
+/// The bar itself: `height` is how tall the thing it floats over is, `fraction` how full.
+fn push_bar(out: &mut Vec<Vertex>, height: f32, fraction: f32, pos: Vec3, front: Vec3, right: Vec3) {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let center = pos + Vec3::Y * (height + BAR_LIFT);
     let (half_w, half_h) = (BAR_WIDTH / 2.0, BAR_HEIGHT / 2.0);
 
     // (left edge, right edge, half height, layer, how far toward the viewer)
@@ -316,7 +332,7 @@ mod tests {
 
     #[test]
     fn a_player_is_a_few_boxes_with_their_face_where_they_look() {
-        let v = player_mesh(AT, 0.0);
+        let v = player_mesh(AT, 0.0, MAX_PLAYER_HP, Vec3::ZERO);
         assert!(v.len() <= MAX_VERTICES_PER_ENEMY);
         assert_eq!(v.len() % 4, 0);
         // Facing yaw 0 is facing -z: the face quad is the one farthest that way.
@@ -324,7 +340,7 @@ mod tests {
         assert_eq!(face.len(), 4);
         assert!(face.iter().all(|v| v.pos[2] < AT.z - 0.2), "{:?}", face[0].pos);
         // Turned half way round, it is on the +z side.
-        let v = player_mesh(AT, std::f32::consts::PI);
+        let v = player_mesh(AT, std::f32::consts::PI, MAX_PLAYER_HP, Vec3::ZERO);
         let face: Vec<&Vertex> = v.iter().filter(|v| v.layer == PLAYER_FACE).collect();
         assert!(face.iter().all(|v| v.pos[2] > AT.z + 0.2));
     }

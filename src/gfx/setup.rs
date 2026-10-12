@@ -129,6 +129,17 @@ impl Gfx {
         let (overlay_vertices, overlay_indices) = mesh::terrain::block_overlay(0, 0, 0, 10.0);
         let crack_vertices = init_buffer(&device, "crack vertices", &overlay_vertices, VERTEX_COPY);
         let crack_indices = init_buffer(&device, "crack indices", &overlay_indices, index);
+        let other_crack_vertices = dynamic_vertex_buffer::<Vertex>(
+            &device,
+            "other crack vertices",
+            super::MAX_OTHER_CRACKS * 24,
+        );
+        let other_crack_indices = init_buffer(
+            &device,
+            "other crack indices",
+            &mesh::creature::indices(super::MAX_OTHER_CRACKS * 24),
+            index,
+        );
         let (outline_v, outline_i) = mesh::terrain::block_outline(0, 0, 0, 12.0);
         let outline_vertices = init_buffer(&device, "outline vertices", &outline_v, VERTEX_COPY);
         let outline_indices = init_buffer(&device, "outline indices", &outline_i, index);
@@ -164,6 +175,9 @@ impl Gfx {
             crack_vertices,
             crack_indices,
             crack_visible: false,
+            other_crack_vertices,
+            other_crack_indices,
+            other_crack_index_count: 0,
             outline_vertices,
             outline_indices,
             outline_index_count: outline_i.len() as u32,

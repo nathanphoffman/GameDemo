@@ -43,6 +43,8 @@ use input::Keys;
 const MOUSE_SENSITIVITY: f32 = 0.0022;
 // How fast the health bar's draining chunk catches up, in hp per second.
 const HP_DRAIN_PER_SECOND: f32 = 30.0;
+// How far away (in blocks) other players' digging can be heard.
+const HEARING_RANGE: f32 = 40.0;
 // Our position is sent to the host at most this often (seconds), unless we do something.
 const POSE_INTERVAL: f32 = 1.0 / 60.0;
 
@@ -168,9 +170,20 @@ impl App {
             self.mirror.apply(tick);
             for event in &tick.events {
                 match *event {
-                    Event::Dug { player, block, ice } if player == self.me => {
-                        if let Some(music) = &self.music {
-                            music.dig(block, ice);
+                    Event::Dug { player, block, ice, pos } => {
+                        // Your own digging is at full volume; other players' gets quieter
+                        // with distance and can't be heard from far off.
+                        let volume = if player == self.me {
+                            1.0
+                        } else {
+                            let center = Vec3::new(pos.0 as f32 + 0.5, pos.1 as f32 + 0.5, pos.2 as f32 + 0.5);
+                            let fade = 1.0 - center.distance(self.body.pos) / HEARING_RANGE;
+                            fade * fade
+                        };
+                        if volume > 0.02
+                            && let Some(music) = &self.music
+                        {
+                            music.dig_at(block, ice, volume);
                         }
                     }
                     Event::RoundSkipped { player } if player == self.me => {

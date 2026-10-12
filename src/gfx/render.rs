@@ -128,6 +128,16 @@ impl Gfx {
                 pass.draw_indexed(0..36, 0, 0..1);
             }
 
+            if self.other_crack_index_count > 0 {
+                pass.set_pipeline(&self.crack_pipeline);
+                pass.set_vertex_buffer(0, self.other_crack_vertices.slice(..));
+                pass.set_index_buffer(
+                    self.other_crack_indices.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..self.other_crack_index_count, 0, 0..1);
+            }
+
             // Rain and wind streaks: plain textured quads in the world, hidden by anything in
             // front of them.
             if self.weather_index_count > 0 {

@@ -111,7 +111,7 @@ impl Game {
         if let Some(block) = self.world.remove_block(x, y, z) {
             let player = &mut self.players[p];
             player.resources.gain(block);
-            self.events.push(Event::Dug { player: player.id, block, ice });
+            self.events.push(Event::Dug { player: player.id, block, ice, pos: (x, y, z) });
         }
     }
 }

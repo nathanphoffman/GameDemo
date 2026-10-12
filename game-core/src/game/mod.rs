@@ -151,8 +151,8 @@ pub enum Command {
 /// Things that happened that a screen or speaker may want to show.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Event {
-    /// A player mined a block (`ice` if it was ice).
-    Dug { player: PlayerId, block: Block, ice: bool },
+    /// A player mined the block at `pos` (`ice` if it was ice).
+    Dug { player: PlayerId, block: Block, ice: bool, pos: (i32, i32, i32) },
     /// A click ended the round in flight early, so health bars should jump to their end value.
     RoundSkipped { player: PlayerId },
 }

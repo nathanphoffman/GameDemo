@@ -3,7 +3,7 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use super::{Game, PlayerId};
+use super::{Game, PlayerId, MINE_INTERVAL};
 use crate::enemy;
 use crate::resources::Resources;
 use crate::weather;
@@ -17,6 +17,8 @@ pub struct PlayerView {
     pub yaw: f32,
     pub pitch: f32,
     pub hp: i32,
+    /// The block they are part way through mining, once it shows cracks.
+    pub cracking: Option<(i32, i32, i32)>,
 }
 
 /// A creature, with what it takes to draw it and its health bar.
@@ -63,12 +65,16 @@ impl Game {
             players: self
                 .players
                 .iter()
-                .map(|p| PlayerView {
+                .enumerate()
+                .map(|(i, p)| PlayerView {
                     id: p.id,
                     pos: p.body.pos,
                     yaw: p.body.yaw,
                     pitch: p.body.pitch,
                     hp: p.combat.player_hp,
+                    cracking: (p.input.mining && p.mine_timer >= MINE_INTERVAL / 2.0)
+                        .then(|| self.block_in_sights_of(i))
+                        .flatten(),
                 })
                 .collect(),
             enemies: self
@@ -153,7 +159,7 @@ mod tests {
 
     fn snap(x: f32) -> Snapshot {
         Snapshot {
-            players: vec![PlayerView { id: PlayerId(1), pos: Vec3::new(x, 0.0, 0.0), yaw: 0.0, pitch: 0.0, hp: 50 }],
+            players: vec![PlayerView { id: PlayerId(1), pos: Vec3::new(x, 0.0, 0.0), yaw: 0.0, pitch: 0.0, hp: 50, cracking: None }],
             enemies: vec![EnemyView {
                 id: 7,
                 kind: enemy::Kind::Deer,
