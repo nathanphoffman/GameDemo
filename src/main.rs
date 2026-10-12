@@ -1,16 +1,12 @@
 mod app;
-mod biome;
-mod combat;
-mod effects;
-mod enemy;
 mod gfx;
 mod hud;
+mod mesh;
 mod music;
-mod player;
-mod resources;
 mod textures;
-mod weather;
-mod world;
+
+// The game's rules live in the library; these keep the `crate::world::...` style paths working.
+use gamedemo::{biome, combat, effects, enemy, player, resources, weather, world};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

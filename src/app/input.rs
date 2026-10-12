@@ -102,7 +102,7 @@ impl ApplicationHandler for App {
         let mut gfx = Gfx::new(window);
         for cz in 0..world::CHUNKS_Z {
             for cx in 0..world::CHUNKS_X {
-                let (vertices, indices) = self.world.build_chunk(cx, cz);
+                let (vertices, indices) = mesh::terrain::build_chunk(&self.world, cx, cz);
                 gfx.set_chunk(cx, cz, &vertices, &indices);
             }
         }

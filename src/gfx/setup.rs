@@ -9,8 +9,7 @@ use super::texture::upload_block_textures;
 use crate::world::{CHUNKS_X, CHUNKS_Z};
 use super::{dynamic_vertex_buffer, init_buffer, make_depth_view, Gfx, Globals};
 use crate::hud::{HudVertex, MAX_HUD_VERTICES};
-use crate::world::{Vertex, World};
-use crate::{enemy, weather};
+use crate::mesh::{self, Vertex};
 
 type DeviceParts = (
     wgpu::Surface<'static>,
@@ -127,21 +126,21 @@ impl Gfx {
         const VERTEX_COPY: wgpu::BufferUsages =
             wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_DST);
         let index = wgpu::BufferUsages::INDEX;
-        let (overlay_vertices, overlay_indices) = World::block_overlay(0, 0, 0, 10.0);
+        let (overlay_vertices, overlay_indices) = mesh::terrain::block_overlay(0, 0, 0, 10.0);
         let crack_vertices = init_buffer(&device, "crack vertices", &overlay_vertices, VERTEX_COPY);
         let crack_indices = init_buffer(&device, "crack indices", &overlay_indices, index);
-        let (outline_v, outline_i) = World::block_outline(0, 0, 0, 12.0);
+        let (outline_v, outline_i) = mesh::terrain::block_outline(0, 0, 0, 12.0);
         let outline_vertices = init_buffer(&device, "outline vertices", &outline_v, VERTEX_COPY);
         let outline_indices = init_buffer(&device, "outline indices", &outline_i, index);
-        let enemy_capacity = enemy::MAX_ENEMIES * enemy::MAX_VERTICES_PER_ENEMY;
+        let enemy_capacity = mesh::creature::MAX_ENEMIES * mesh::creature::MAX_VERTICES_PER_ENEMY;
         let enemy_vertices = dynamic_vertex_buffer::<Vertex>(&device, "enemy vertices", enemy_capacity);
-        let enemy_indices = init_buffer(&device, "enemy indices", &enemy::indices(enemy_capacity), index);
+        let enemy_indices = init_buffer(&device, "enemy indices", &mesh::creature::indices(enemy_capacity), index);
         let weather_vertices =
-            dynamic_vertex_buffer::<Vertex>(&device, "weather streaks", weather::MAX_STREAK_VERTICES);
+            dynamic_vertex_buffer::<Vertex>(&device, "weather streaks", mesh::streaks::MAX_STREAK_VERTICES);
         let weather_indices = init_buffer(
             &device,
             "weather indices",
-            &enemy::indices(weather::MAX_STREAK_VERTICES),
+            &mesh::creature::indices(mesh::streaks::MAX_STREAK_VERTICES),
             index,
         );
         let hud_buf = dynamic_vertex_buffer::<HudVertex>(&device, "hud", MAX_HUD_VERTICES);

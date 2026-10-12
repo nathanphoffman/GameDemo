@@ -134,7 +134,7 @@ impl App {
     pub(crate) fn rebuild_mesh(&mut self) {
         for (cx, cz) in self.world.take_dirty() {
             if let Some(gfx) = &mut self.gfx {
-                let (vertices, indices) = self.world.build_chunk(cx, cz);
+                let (vertices, indices) = mesh::terrain::build_chunk(&self.world, cx, cz);
                 gfx.set_chunk(cx, cz, &vertices, &indices);
             }
         }

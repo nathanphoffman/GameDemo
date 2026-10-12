@@ -13,8 +13,8 @@ use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::{enemy};
-use crate::world::{Vertex, World, CHUNKS_X};
+use crate::mesh::{self, Vertex};
+use crate::world::CHUNKS_X;
 
 pub(crate) const FOV_Y_DEGREES: f32 = 80.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -129,7 +129,7 @@ impl Gfx {
     pub(crate) fn set_outline(&mut self, target: Option<(Vec3, Vec3)>) {
         self.outline_visible = target.is_some();
         if let Some((min, max)) = target {
-            let (vertices, _) = World::box_outline(min, max, 12.0);
+            let (vertices, _) = mesh::terrain::box_outline(min, max, 12.0);
             self.queue
                 .write_buffer(&self.outline_vertices, 0, bytemuck::cast_slice(&vertices));
         }
@@ -137,7 +137,7 @@ impl Gfx {
 
     /// Uploads every enemy's body and health bar (4-vertex quads, back to back).
     pub(crate) fn set_enemies(&mut self, vertices: &[Vertex]) {
-        let capacity = enemy::MAX_ENEMIES * enemy::MAX_VERTICES_PER_ENEMY;
+        let capacity = mesh::creature::MAX_ENEMIES * mesh::creature::MAX_VERTICES_PER_ENEMY;
         let vertices = &vertices[..vertices.len().min(capacity)];
         self.queue
             .write_buffer(&self.enemy_vertices, 0, bytemuck::cast_slice(vertices));
@@ -149,7 +149,7 @@ impl Gfx {
         self.crack_visible = target.is_some();
         if let Some(((x, y, z), stage)) = target {
             let layer = 9.0 + stage as f32; // texture layers 10 and 11
-            let (vertices, _) = World::block_overlay(x, y, z, layer);
+            let (vertices, _) = mesh::terrain::block_overlay(x, y, z, layer);
             self.queue
                 .write_buffer(&self.crack_vertices, 0, bytemuck::cast_slice(&vertices));
         }

@@ -30,7 +30,8 @@ use crate::music;
 use crate::player::{self, Player};
 use crate::resources::{Converter, Resources};
 use crate::weather::Weather;
-use crate::world::{self, Vertex, World};
+use crate::mesh::{self, Vertex};
+use crate::world::{self, World};
 use input::Keys;
 
 const WALK_SPEED: f32 = 5.0;

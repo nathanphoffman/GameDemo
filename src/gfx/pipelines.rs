@@ -2,7 +2,7 @@
 
 use super::DEPTH_FORMAT;
 use crate::hud::HudVertex;
-use crate::world::Vertex;
+use crate::mesh::Vertex;
 
 pub(super) struct Pipelines {
     pub sky: wgpu::RenderPipeline,

@@ -60,7 +60,7 @@ impl App {
         let enemy_mesh: Vec<Vertex> = self
             .enemies
             .iter()
-            .flat_map(|e| e.mesh(e.facing(look_at)))
+            .flat_map(|e| mesh::creature::enemy_mesh(e, e.facing(look_at)))
             .collect();
 
         self.recenter_cursor();

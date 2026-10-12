@@ -5,7 +5,8 @@ use glam::{Mat4, Vec3};
 use super::{Gfx, Globals, DRAW_DISTANCE, FOV_Y_DEGREES};
 use crate::world::{CHUNK, CHUNKS_X};
 use crate::hud::{HudVertex, MAX_HUD_VERTICES};
-use crate::weather::{self, Weather};
+use crate::mesh;
+use crate::weather::Weather;
 
 impl Gfx {
     pub(crate) fn render(&mut self, eye: Vec3, forward: Vec3, time: f32, weather: &Weather, hud: &[HudVertex]) {
@@ -39,7 +40,7 @@ impl Gfx {
         } else {
             (weather.params.rain, weather.params.wind)
         };
-        let streaks = weather::streak_mesh(eye, time, rain, wind, weather.snowing);
+        let streaks = mesh::streaks::streak_mesh(eye, time, rain, wind, weather.snowing);
         self.queue
             .write_buffer(&self.weather_vertices, 0, bytemuck::cast_slice(&streaks));
         self.weather_index_count = (streaks.len() / 4 * 6) as u32;
