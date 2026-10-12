@@ -22,6 +22,12 @@ impl App {
         self.weather.snowing = self.world.is_cold(px, pz);
         self.weather.underwater = self.world.in_water(self.player.eye());
         self.weather.update(dt);
+        if let Some(music) = &mut self.music {
+            // Rain you hear is snow in the cold; either way it is as loud as the rain is.
+            let amount = self.weather.params.rain;
+            let snowing = self.weather.snowing;
+            music.set_weather(if snowing { 0.0 } else { amount }, if snowing { amount } else { 0.0 }, dt);
+        }
 
         let conversion_boost = self.update_background(dt);
 

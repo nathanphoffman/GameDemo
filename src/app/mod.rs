@@ -84,7 +84,7 @@ pub(crate) struct App {
     /// pulling it back to the middle of the window so it can't wander onto another monitor.
     cursor_locked: bool,
     was_busy: bool,
-    _music: Option<music::Music>,
+    music: Option<music::Music>,
 }
 
 impl App {
@@ -122,7 +122,7 @@ impl App {
             focused: true,
             cursor_locked: false,
             was_busy: false,
-            _music: music::Music::start(),
+            music: music::Music::start(),
         }
     }
 
