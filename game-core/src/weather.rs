@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::biome::Biome;
 
 /// Seconds of gameplay between weather checks.
-pub const CHECK_INTERVAL_SECONDS: f32 = 300.0;
+pub const CHECK_INTERVAL_SECONDS: f32 = 60.0;
 /// Chance that a check picks one of the non-sunny kinds, from 0 to 1. Otherwise the weather
 /// is sunny, so about two checks in three give sun.
 pub const NON_SUNNY_CHANCE: f32 = 1.0 / 3.0;
@@ -53,8 +53,8 @@ impl Kind {
             Kind::Sunny => (70.0, 230.0, 0.0, 0.0, 0.0, 0.3),
             Kind::Fog => (4.0, 55.0, 0.35, 0.15, 0.0, 0.2),
             Kind::LightRain => (40.0, 170.0, 0.7, 0.2, 0.45, 0.4),
-            Kind::HeavyRain => (20.0, 110.0, 1.0, 0.4, 1.0, 0.8),
-            Kind::Windy => (70.0, 230.0, 0.2, 0.0, 0.0, 1.0),
+            Kind::HeavyRain => (25.0, 130.0, 0.9, 0.3, 0.8, 0.6),
+            Kind::Windy => (70.0, 230.0, 0.2, 0.0, 0.0, 0.75),
             Kind::Mist => (20.0, 130.0, 0.3, 0.1, 0.0, 0.15),
         };
         Params {
@@ -219,12 +219,12 @@ mod tests {
 
     #[test]
     fn starts_sunny_and_only_changes_at_each_check() {
-        let mut w = Weather::with_settings(7, 300.0, 1.0);
+        let mut w = Weather::with_settings(7, 60.0, 1.0);
         assert_eq!(w.kind, Kind::Sunny);
-        run(&mut w, 299.0);
+        run(&mut w, 59.0);
         assert_eq!(w.kind, Kind::Sunny, "not before the first check");
         run(&mut w, 1.5);
-        assert_ne!(w.kind, Kind::Sunny, "a certain change happens at 5 minutes");
+        assert_ne!(w.kind, Kind::Sunny, "a certain change happens at 1 minute");
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         run(&mut never, 3000.0);
         assert_eq!(never.kind, Kind::Sunny);
 
-        let mut w = Weather::with_settings(11, 300.0, NON_SUNNY_CHANCE);
+        let mut w = Weather::with_settings(11, 300.0, 1.0 / 3.0);
         let mut not_sunny = 0;
         for _ in 0..300 {
             run(&mut w, 300.0);
@@ -290,6 +290,6 @@ mod tests {
         windy.kind = Kind::Windy;
         windy.params = Kind::Windy.params();
         run(&mut windy, 10.0);
-        assert!(windy.cloud_offset[0] > calm.cloud_offset[0] * 2.0);
+        assert!(windy.cloud_offset[0] > calm.cloud_offset[0] * 1.5);
     }
 }
